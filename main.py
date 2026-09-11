@@ -42,7 +42,17 @@ def main():
     stats = get_stats()
     print(f"📊 Текущая статистика базы данных: {stats}\n")
 
+    # Автоматическая проверка и загрузка Chromium Playwright (для облачных хостингов)
+    try:
+        import subprocess
+        print("📦 Проверка и загрузка браузера Chromium для Playwright...")
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        print("✅ Браузер Chromium готов к запуску!\n")
+    except Exception as e:
+        logger.warning(f"Предупреждение при загрузке Chromium: {e}")
+
     bot = KworkBot()
+
     try:
         bot.start_browser()
 
