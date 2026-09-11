@@ -10,8 +10,9 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import config
 from database import init_db, is_order_processed, save_order, get_stats
-from gemini_analyzer import analyze_kwork_order
+from gemini_analyzer import analyze_kwork_order, parse_budget_details
 from kwork_parser import KworkBot
+
 from notifier import notify_order_offer
 
 
@@ -93,6 +94,26 @@ def main():
                             status="SKIPPED_TOO_MANY_OFFERS"
                         )
                         continue
+
+                    # Фильтр: если допустимый бюджет заказчика строго ниже MIN_ACCEPTABLE_PRICE, не тратим квоту AI
+                    desired, max_allowed = parse_budget_details(budget_info)
+                    if max_allowed and max_allowed < config.MIN_ACCEPTABLE_PRICE:
+                        logger.info(
+                            f"⏭️ Пропуск заказа #{order_id} ('{title}'): потолок бюджета ({max_allowed} ₽) "
+                            f"ниже минимального порога ({config.MIN_ACCEPTABLE_PRICE} ₽)."
+                        )
+                        save_order(
+                            kwork_id=order_id,
+                            title=title,
+                            description=description,
+                            budget_info=budget_info,
+                            desired_price=desired,
+                            is_feasible=False,
+                            reasoning=f"Потолок бюджета ({max_allowed} ₽) ниже минимальной планки ({config.MIN_ACCEPTABLE_PRICE} ₽)",
+                            status="SKIPPED_BUDGET_TOO_LOW"
+                        )
+                        continue
+
 
                     logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (уже подано откликов: {offers_count})")
                     logger.info(f"Бюджет: {budget_info}")
