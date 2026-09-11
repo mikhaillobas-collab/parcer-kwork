@@ -36,7 +36,21 @@ def main():
     print(f"🔹 Режим DRY_RUN (безопасный тест): {'ВКЛЮЧЕН (отклики НЕ списываются)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (БОЕВОЙ РЕЖИМ)'}")
     print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (окно на экране)'}")
     print(f"🔹 Интервал проверки: {config.CHECK_INTERVAL_MIN} - {config.CHECK_INTERVAL_MAX} сек.")
+    print(f"🔹 Прокси для Gemini/Telegram: {'УСТАНОВЛЕН' if config.GEMINI_PROXY else 'НЕ ЗАДАН (прямое подключение)'}")
+    print(f"🔹 Telegram-уведомления: {'ВКЛЮЧЕНЫ (Chat ID: ' + str(config.TELEGRAM_CHAT_ID) + ')' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'ВЫКЛЮЧЕНЫ (не задан токен или chat_id)'}")
     print("=" * 65)
+
+    # Тестовая проверка отправки Telegram при старте
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+        try:
+            from notifier import send_telegram_message
+            tg_ok = send_telegram_message("🟢 <b>Kwork Automation Bot запущен и готов к работе!</b>")
+            if tg_ok:
+                print("✅ Тестовое уведомление успешно отправлено в Telegram!\n")
+            else:
+                print("⚠️ Не удалось отправить тестовое уведомление в Telegram (проверьте токен/прокси).\n")
+        except Exception as e:
+            print(f"⚠️ Ошибка при проверке Telegram: {e}\n")
 
     # Инициализация БД
     init_db()
