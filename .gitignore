@@ -1,0 +1,48 @@
+# Environment files & Secrets
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Playwright & Browser Sessions (CRITICAL: Contains Kwork cookies & tokens)
+browser_profile/
+browser_profile*/
+*.tar.gz
+*.zip
+*.tar
+*.bak
+
+# SQLite Databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Screenshots (Contains confidential client/order screenshots)
+screenshots/
+*.png
+*.jpg
+*.jpeg
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Logs
+*.log
+logs/
+
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+

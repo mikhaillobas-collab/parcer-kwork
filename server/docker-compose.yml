@@ -1,0 +1,24 @@
+services:
+  kwork-bot:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: kwork_bot
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    volumes:
+      # Постоянный профиль сессии Kwork (куки, авторизация)
+      - ../browser_profile:/app/browser_profile
+      # Папка для скриншотов откликов
+      - ../screenshots:/app/screenshots
+      # База данных SQLite
+      - ../kwork_bot.db:/app/kwork_bot.db
+    # Ограничения ресурсов и параметры безопасности
+    shm_size: '1gb'
+    ipc: host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

@@ -1,0 +1,48 @@
+{
+  "hourly_rate": 1500,
+  "min_order_price": 3000,
+  "categories": {
+    "bugfix_or_modification": {
+      "name": "Доработка / исправление бага в существующем коде/боте",
+      "base_price": 3000,
+      "min_price": 3000,
+      "estimated_hours": 2
+    },
+    "simple_parser": {
+      "name": "Простой парсер одного сайта (BS4/requests)",
+      "base_price": 3000,
+      "min_price": 3000,
+      "estimated_hours": 3
+    },
+    "complex_parser": {
+      "name": "Сложный парсер (Playwright, авторизация, капча, динамический JS)",
+      "base_price": 5000,
+      "min_price": 4000,
+      "estimated_hours": 5
+    },
+    "simple_bot": {
+      "name": "Чат-бот на коде (меню, кнопки, FAQ, сбор контактов)",
+      "base_price": 3500,
+      "min_price": 3000,
+      "estimated_hours": 3
+    },
+    "advanced_bot": {
+      "name": "Чат-бот сложный (БД, интеграции, платежи, парсинг, админка)",
+      "base_price": 6000,
+      "min_price": 4500,
+      "estimated_hours": 6
+    },
+    "api_integration": {
+      "name": "Интеграция сторонних API / вебхуки / автоматизация",
+      "base_price": 4000,
+      "min_price": 3000,
+      "estimated_hours": 4
+    },
+    "general_script": {
+      "name": "Скрипт автоматизации / обработка данных Excel, CSV, PDF",
+      "base_price": 3000,
+      "min_price": 3000,
+      "estimated_hours": 3
+    }
+  }
+}
