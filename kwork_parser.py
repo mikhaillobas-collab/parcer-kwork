@@ -44,14 +44,32 @@ class KworkBot:
             "--disable-gpu"
         ]
         
-        self.context = self.playwright.chromium.launch_persistent_context(
-            user_data_dir=str(config.USER_DATA_DIR),
-            headless=config.HEADLESS,
-            args=launch_args,
-            viewport={"width": 1440, "height": 900},
-            locale="ru-RU",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-        )
+        try:
+            self.context = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(config.USER_DATA_DIR),
+                headless=config.HEADLESS,
+                args=launch_args,
+                viewport={"width": 1440, "height": 900},
+                locale="ru-RU",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+            )
+        except Exception as e:
+            if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
+                logger.info("📦 Бинарники Chromium не найдены на хостинге. Автоматическая загрузка (playwright install chromium)...")
+                import subprocess
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                logger.info("✅ Chromium успешно установлен! Повторный запуск браузера...")
+                self.context = self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(config.USER_DATA_DIR),
+                    headless=config.HEADLESS,
+                    args=launch_args,
+                    viewport={"width": 1440, "height": 900},
+                    locale="ru-RU",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                )
+            else:
+                raise e
+
         # Скрываем автоматизацию от проверок JS
         self.context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {
