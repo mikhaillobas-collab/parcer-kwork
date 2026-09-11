@@ -51,10 +51,40 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # Авторизационные куки для облачного хостинга (Bothost, Railway и др.)
 KWORK_COOKIES = os.getenv("KWORK_COOKIES", "").strip()
 
+import urllib.parse
+import re
+
+def normalize_proxy(raw: str) -> str:
+    """Приводит прокси любого формата (включая IP:PORT:USER:PASS) к валидному URL для httpx."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if raw.startswith(("http://", "https://", "socks5://", "socks4://")) and "@" in raw:
+        return raw
+    
+    clean = re.sub(r"^(https?|socks5|socks4)://", "", raw)
+    parts = clean.split(":")
+    if len(parts) == 4:
+        ip, port, user, pwd = parts
+        user_enc = urllib.parse.quote(user)
+        pwd_enc = urllib.parse.quote(pwd)
+        scheme = "socks5://" if "socks5" in raw else "http://"
+        return f"{scheme}{user_enc}:{pwd_enc}@{ip}:{port}"
+    
+    if "@" in clean:
+        scheme = "socks5://" if "socks5" in raw else "http://"
+        return f"{scheme}{clean}"
+        
+    if not raw.startswith(("http://", "https://", "socks5://")):
+        return "http://" + raw
+    return raw
+
 # Прокси для обхода геоблокировки Google Gemini (User location is not supported)
-# Пример: http://user:password@proxy_ip:port или socks5://user:password@proxy_ip:port
-GEMINI_PROXY = os.getenv("GEMINI_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
+# Поддерживает любые форматы: http://user:pass@ip:port или ip:port:user:pass
+_raw_proxy = os.getenv("GEMINI_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
+GEMINI_PROXY = normalize_proxy(_raw_proxy)
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip()
+
 
 
 
