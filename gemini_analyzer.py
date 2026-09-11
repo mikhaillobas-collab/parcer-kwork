@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from config import GEMINI_API_KEY, GEMINI_MODEL, MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH
+from config import GEMINI_API_KEY, GEMINI_MODEL, MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH, GEMINI_PROXY, GEMINI_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +151,12 @@ def analyze_kwork_order(
     """
     http_options = None
     client_args = {}
-    if getattr(config, "GEMINI_PROXY", None):
-        client_args["proxy"] = config.GEMINI_PROXY
+    if GEMINI_PROXY:
+        client_args["proxy"] = GEMINI_PROXY
 
-    if client_args or getattr(config, "GEMINI_BASE_URL", None):
+    if client_args or GEMINI_BASE_URL:
         http_options = types.HttpOptions(
-            base_url=config.GEMINI_BASE_URL or None,
+            base_url=GEMINI_BASE_URL or None,
             client_args=client_args or None
         )
 
@@ -205,7 +205,6 @@ def analyze_kwork_order(
         "8. Срок выполнения (duration_days): строго 2 или 3 дня."
     )
 
-
     user_prompt = f"""
 Информация о заказе с биржи Kwork:
 Заголовок: {title}
@@ -217,7 +216,7 @@ def analyze_kwork_order(
 {description}
 """
 
-    config = types.GenerateContentConfig(
+    gen_config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=ProposalAnalysis,
         system_instruction=system_prompt,
@@ -239,7 +238,7 @@ def analyze_kwork_order(
                 response = client.models.generate_content(
                     model=model_name,
                     contents=user_prompt,
-                    config=config
+                    config=gen_config
                 )
                 data = json.loads(response.text)
                 result = ProposalAnalysis(**data)
