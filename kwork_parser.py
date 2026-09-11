@@ -250,23 +250,52 @@ class KworkBot:
             await self.page.goto(url, wait_until="domcontentloaded")
             await asyncio.sleep(2)
 
-            offer_btn = self.page.locator(".kw-button--green:has-text('Предложить услугу'), span:has-text('Предложить услугу'):not(.want-card__open-review)").first
+            # Ищем кнопку "Предложить услугу"
+            offer_btn = self.page.locator(
+                ".kw-button--green:has-text('Предложить услугу'), "
+                "button:has-text('Предложить услугу'), "
+                "a:has-text('Предложить услугу'), "
+                "span:has-text('Предложить услугу'):not(.want-card__open-review)"
+            ).first
+
             if not await offer_btn.is_visible():
-                return False, None, "Кнопка 'Предложить услугу' недоступна (проект закрыт или отклик уже подан)"
+                # Проверяем, возможно форма уже открыта на странице
+                if await self.page.locator("textarea[placeholder*='Напишите, как вы будете решать'], textarea[name='description']").count() == 0:
+                    return False, None, "Кнопка 'Предложить услугу' недоступна (проект закрыт или отклик уже подан)"
 
-            await offer_btn.scroll_into_view_if_needed()
-            await offer_btn.click(force=True)
-            await asyncio.sleep(2)
+            if await offer_btn.is_visible():
+                await offer_btn.scroll_into_view_if_needed()
+                await offer_btn.click(force=True)
+                await asyncio.sleep(2)
 
-            modal = self.page.locator(".modal-dialog, .modal-content, .b-modal, .popup, div:has(button:has-text('Предложить'))").first
+            # Ожидаем появления поля textarea (в модальном окне или на странице)
+            desc_textarea = None
+            selectors = [
+                ".modal-dialog textarea",
+                ".modal-content textarea",
+                ".b-modal textarea",
+                ".popup textarea",
+                "textarea[placeholder*='Напишите, как вы будете решать']",
+                "textarea[name='description']",
+                "textarea"
+            ]
 
-            # 1. Поле Описание
-            if await modal.is_visible() and await modal.locator("textarea").count() > 0:
-                desc_textarea = modal.locator("textarea").first
-            else:
-                desc_textarea = self.page.locator("textarea[placeholder*='Напишите, как вы будете решать'], textarea[name='description'], textarea").first
+            for attempt in range(3):
+                for sel in selectors:
+                    loc = self.page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        desc_textarea = loc
+                        break
+                if desc_textarea:
+                    break
+                await asyncio.sleep(1)
 
-            await desc_textarea.wait_for(state="visible", timeout=10000)
+            if not desc_textarea:
+                # Делаем скриншот страницы, чтобы точно увидеть состояние экрана
+                err_shot = config.SCREENSHOTS_DIR / f"notextarea_{order_id}.png"
+                await self.page.screenshot(path=str(err_shot), full_page=True)
+                return False, err_shot, "Поле ввода отклика (textarea) не появилось после клика на кнопку предложения"
+
             await desc_textarea.scroll_into_view_if_needed()
             await desc_textarea.click()
             await desc_textarea.fill(proposal_text)

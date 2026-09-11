@@ -98,7 +98,13 @@ def register_handlers(dispatcher: Dispatcher) -> None:
                     await status_msg.delete()
                 else:
                     update_order_status(order_id, "FAILED_SUBMIT", error_msg=err_msg)
-                    await status_msg.edit_text(f"❌ <b>Ошибка отправки заказа #{order_id}:</b>\n{err_msg}")
+                    err_caption = f"❌ <b>Ошибка отправки заказа #{order_id}:</b>\n<code>{err_msg[:400]}</code>"
+                    if screenshot_path and Path(screenshot_path).exists():
+                        photo = FSInputFile(str(screenshot_path))
+                        await callback.message.reply_photo(photo=photo, caption=err_caption)
+                        await status_msg.delete()
+                    else:
+                        await status_msg.edit_text(err_caption)
             except Exception as e:
                 logger.error(f"Ошибка при исполнении callback approve для #{order_id}: {e}")
                 await status_msg.edit_text(f"❌ Ошибка выполнения: {e}")
