@@ -51,6 +51,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # Авторизационные куки для облачного хостинга (Bothost, Railway и др.)
 KWORK_COOKIES = os.getenv("KWORK_COOKIES", "").strip()
 
+# Прокси для обхода геоблокировки Google Gemini (User location is not supported)
+# Пример: http://user:password@proxy_ip:port или socks5://user:password@proxy_ip:port
+GEMINI_PROXY = os.getenv("GEMINI_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip()
+
+
 
 
 

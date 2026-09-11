@@ -149,11 +149,20 @@ def analyze_kwork_order(
     - Оценивает адекватность цены по тарифной сетке и допустимому диапазону Kwork.
     - Формирует аргументированный профессиональный отклик (от 160 до 1900 символов).
     """
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY не указан! Укажите его в файле .env")
+    http_options = None
+    client_args = {}
+    if getattr(config, "GEMINI_PROXY", None):
+        client_args["proxy"] = config.GEMINI_PROXY
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    if client_args or getattr(config, "GEMINI_BASE_URL", None):
+        http_options = types.HttpOptions(
+            base_url=config.GEMINI_BASE_URL or None,
+            client_args=client_args or None
+        )
+
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_options)
     pricing_rules = load_pricing_rules()
+
     extracted_desired, extracted_max = parse_budget_details(budget_info)
 
     system_prompt = (
