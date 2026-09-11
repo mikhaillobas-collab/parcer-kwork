@@ -11,6 +11,12 @@ browser_profile*/
 *.zip
 *.tar
 *.bak
+kwork_cookies*
+*cookies*.txt
+*cookies*.json
+*.session
+
+
 
 # SQLite Databases
 *.db

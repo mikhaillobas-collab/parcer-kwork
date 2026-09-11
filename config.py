@@ -28,7 +28,15 @@ CHECK_INTERVAL_MAX = int(os.getenv("CHECK_INTERVAL_MAX", "120"))
 
 # Пути к данным
 USER_DATA_DIR = BASE_DIR / "browser_profile"
-DB_PATH = BASE_DIR / "kwork_bot.db"
+
+# Если на сервере (например, Bothost / Docker) есть постоянный том /app/data, сохраняем БД туда
+if os.path.exists("/app/data"):
+    DEFAULT_DB_PATH = Path("/app/data/kwork_bot.db")
+else:
+    DEFAULT_DB_PATH = BASE_DIR / "kwork_bot.db"
+
+DB_PATH = Path(os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
+
 # Настройки ценообразования и фильтров
 MIN_ACCEPTABLE_PRICE = int(os.getenv("MIN_ACCEPTABLE_PRICE", "3000"))
 MAX_EXISTING_OFFERS = int(os.getenv("MAX_EXISTING_OFFERS", "10"))
@@ -39,6 +47,10 @@ SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 # Telegram-уведомления
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# Авторизационные куки для облачного хостинга (Bothost, Railway и др.)
+KWORK_COOKIES = os.getenv("KWORK_COOKIES", "").strip()
+
 
 
 

@@ -58,6 +58,22 @@ class KworkBot:
                 get: () => undefined
             });
         """)
+
+        # Если в переменных окружения переданы куки (для Bothost и облачных хостингов)
+        if config.KWORK_COOKIES:
+            try:
+                import json
+                import base64
+                c_str = config.KWORK_COOKIES
+                if c_str.startswith("base64:"):
+                    c_str = base64.b64decode(c_str[7:]).decode("utf-8")
+                cookies_list = json.loads(c_str)
+                if isinstance(cookies_list, list):
+                    self.context.add_cookies(cookies_list)
+                    logger.info(f"🔑 Успешно внедрено {len(cookies_list)} куков авторизации из KWORK_COOKIES!")
+            except Exception as e:
+                logger.warning(f"Ошибка при импорте KWORK_COOKIES: {e}")
+
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(20000)
 
