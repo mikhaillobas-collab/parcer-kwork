@@ -98,6 +98,14 @@ def update_order_status(kwork_id: str, status: str, error_msg: str = "") -> None
         """, (status, error_msg, now, str(kwork_id)))
         conn.commit()
 
+def get_order_by_id(kwork_id: str) -> Optional[Dict[str, Any]]:
+    """Возвращает информацию о заказе по его kwork_id."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM orders WHERE kwork_id = ?", (str(kwork_id),))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 def get_stats() -> Dict[str, int]:
     """Возвращает общую статистику по заказам."""
     with get_connection() as conn:
@@ -105,3 +113,4 @@ def get_stats() -> Dict[str, int]:
         cursor.execute("SELECT status, COUNT(*) as count FROM orders GROUP BY status")
         rows = cursor.fetchall()
         return {row["status"]: row["count"] for row in rows}
+

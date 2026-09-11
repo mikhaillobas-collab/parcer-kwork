@@ -3,7 +3,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -434,3 +434,128 @@ class KworkBot:
             except Exception:
                 pass
             return False
+
+    def submit_proposal_by_id(
+        self,
+        order_id: str,
+        proposal_title: str,
+        proposal_text: str,
+        price: int,
+        duration_days: int = 3
+    ) -> Tuple[bool, Optional[Path], str]:
+        """
+        Открывает страницу заказа https://kwork.ru/projects/<order_id>/view,
+        заполняет форму отклика и отправляет её на биржу.
+        Возвращает: (успех, путь_к_скриншоту, сообщение_об_ошибке).
+        """
+        try:
+            url = f"https://kwork.ru/projects/{order_id}/view"
+            logger.info(f"Открытие страницы проекта: {url}...")
+            self.page.goto(url, wait_until="domcontentloaded")
+            time.sleep(2)
+
+            offer_btn = self.page.locator(".kw-button--green:has-text('Предложить услугу'), span:has-text('Предложить услугу'):not(.want-card__open-review)").first
+            if not offer_btn.is_visible():
+                return False, None, "Кнопка 'Предложить услугу' недоступна (проект закрыт или отклик уже подан)"
+
+            offer_btn.scroll_into_view_if_needed()
+            offer_btn.click(force=True)
+            time.sleep(2)
+
+            modal = self.page.locator(".modal-dialog, .modal-content, .b-modal, .popup, div:has(button:has-text('Предложить'))").first
+
+            # 1. Поле Описание
+            if modal.is_visible() and modal.locator("textarea").count() > 0:
+                desc_textarea = modal.locator("textarea").first
+            else:
+                desc_textarea = self.page.locator("textarea[placeholder*='Напишите, как вы будете решать'], textarea[name='description'], textarea").first
+
+            desc_textarea.wait_for(state="visible", timeout=10000)
+            desc_textarea.scroll_into_view_if_needed()
+            desc_textarea.click()
+            desc_textarea.fill(proposal_text)
+            try:
+                self.page.evaluate("""(el) => {
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""", desc_textarea.element_handle())
+            except Exception:
+                pass
+
+            # 2. Поле Стоимость
+            price_input = self.page.locator("input[placeholder*=' - '], input[name='price'], div:has-text('Стоимость') + div input, div:has-text('Стоимость') input").first
+            if price_input.is_visible() and price:
+                placeholder = price_input.get_attribute("placeholder") or ""
+                ph_clean = placeholder.replace(" ", "").replace("\xa0", "")
+                range_match = re.findall(r"\d+", ph_clean)
+                target_price = price
+                if len(range_match) >= 2:
+                    max_limit = int(range_match[-1])
+                    if target_price > max_limit:
+                        target_price = max_limit
+                price_input.fill(str(target_price))
+
+            # 3. Поле Название
+            title_input = self.page.locator("input[placeholder*='Введите название заказа'], input[name='title']").first
+            if title_input.is_visible():
+                title_input.fill(proposal_title[:70])
+
+            # 4. Срок
+            duration = duration_days if duration_days in (2, 3) else 3
+            duration_select = self.page.locator("select[name*='term'], select[name*='duration'], select").first
+            if duration_select.is_visible():
+                try:
+                    duration_select.select_option(label=re.compile(f"{duration}"))
+                except Exception:
+                    duration_select.select_option(value=str(duration))
+            else:
+                dropdown_trigger = self.page.locator("div:has-text('Срок выполнения'), .duration-select, .select-styled").last
+                if dropdown_trigger.is_visible():
+                    dropdown_trigger.click()
+                    time.sleep(1)
+                    option_item = self.page.locator(f"li:has-text('{duration} дн'), div:has-text('{duration} дн'), span:has-text('{duration} дн')").first
+                    if option_item.is_visible():
+                        option_item.click()
+                        time.sleep(0.5)
+
+            # Скриншот перед отправкой/в сухом режиме
+            shot_file = config.SCREENSHOTS_DIR / f"offer_{order_id}.png"
+            try:
+                if modal.is_visible():
+                    modal.screenshot(path=str(shot_file))
+                else:
+                    self.page.screenshot(path=str(shot_file), full_page=False)
+            except Exception:
+                self.page.screenshot(path=str(shot_file), full_page=False)
+
+            if config.DRY_RUN:
+                logger.info(f"🛡️ [DRY_RUN] Отклик на #{order_id} подтвержден пользователем, но отправка симулирована.")
+                close_btn = self.page.locator("button.close, .modal-close, span:has-text('✕'), .popup-close").first
+                if close_btn.is_visible():
+                    close_btn.click()
+                else:
+                    self.page.keyboard.press("Escape")
+                return True, shot_file, ""
+
+            # Боевая отправка
+            submit_btn = self.page.locator("button:has-text('Предложить'), input[type='submit'][value='Предложить']").first
+            submit_btn.click()
+            time.sleep(3)
+            logger.info(f"✅ Отклик на заказ #{order_id} успешно отправлен на Kwork!")
+
+            # Скриншот после отправки
+            confirm_shot = config.SCREENSHOTS_DIR / f"sent_{order_id}.png"
+            try:
+                self.page.screenshot(path=str(confirm_shot), full_page=False)
+                return True, confirm_shot, ""
+            except Exception:
+                return True, shot_file, ""
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки отклика #{order_id}: {e}")
+            err_shot = config.SCREENSHOTS_DIR / f"err_{order_id}.png"
+            try:
+                self.page.screenshot(path=str(err_shot))
+            except Exception:
+                pass
+            return False, err_shot, str(e)

@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import random
 import re
 import sys
 import time
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -10,233 +12,245 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 import config
-from database import init_db, is_order_processed, save_order, get_stats
+from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id
 from gemini_analyzer import analyze_kwork_order, parse_budget_details
 from kwork_parser import KworkBot
+from tg_bot import (
+    start_telegram_polling,
+    send_order_card_for_approval,
+    set_approve_handler,
+    get_bot
+)
 
-from notifier import notify_order_offer
-
-
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("kwork_bot")
 
-def main():
-    print("=" * 65)
-    print("🤖 KWORK AUTOMATION BOT (GEMINI 3.7 / 3.8 / 2.5 POWERED)")
-    print("=" * 65)
+async def run_parser_loop(bot: KworkBot):
+    """Фоновый цикл периодического скрапинга и анализа биржи Kwork."""
+    logger.info("🚀 Запуск фонового цикла мониторинга биржи Kwork...")
+    iteration = 0
 
-    # Проверка ключа API
-    if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_gemini_api_key_here":
-        print("\n❌ ОШИБКА: Не задан GEMINI_API_KEY в файле .env!")
-        print("Пожалуйста, создайте или откройте файл .env и вставьте ваш ключ:")
-        print("GEMINI_API_KEY=AIzaSy...")
-        print("Ключ можно получить бесплатно на https://aistudio.google.com/\n")
-        sys.exit(1)
+    while True:
+        iteration += 1
+        logger.info(f"\n--- [Итерация #{iteration}] Проверка биржи Kwork ---")
 
-    print(f"🔹 Модель Gemini: {config.GEMINI_MODEL}")
-    print(f"🔹 URL биржи: {config.KWORK_URL}")
-    print(f"🔹 Режим DRY_RUN (безопасный тест): {'ВКЛЮЧЕН (отклики НЕ списываются)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (БОЕВОЙ РЕЖИМ)'}")
-    print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (окно на экране)'}")
-    print(f"🔹 Интервал проверки: {config.CHECK_INTERVAL_MIN} - {config.CHECK_INTERVAL_MAX} сек.")
-    print(f"🔹 Прокси для Gemini/Telegram: {'УСТАНОВЛЕН' if config.GEMINI_PROXY else 'НЕ ЗАДАН (прямое подключение)'}")
-    print(f"🔹 Telegram-уведомления: {'ВКЛЮЧЕНЫ (Chat ID: ' + str(config.TELEGRAM_CHAT_ID) + ')' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'ВЫКЛЮЧЕНЫ (не задан токен или chat_id)'}")
-    print("=" * 65)
-
-    # Тестовая проверка отправки Telegram при старте
-    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
         try:
-            from notifier import send_telegram_message
-            tg_ok = send_telegram_message("🟢 <b>Kwork Automation Bot запущен и готов к работе!</b>")
-            if tg_ok:
-                print("✅ Тестовое уведомление успешно отправлено в Telegram!\n")
-            else:
-                print("⚠️ Не удалось отправить тестовое уведомление в Telegram (проверьте токен/прокси).\n")
-        except Exception as e:
-            print(f"⚠️ Ошибка при проверке Telegram: {e}\n")
+            # Запускаем синхронные операции парсера в отдельном потоке, чтобы не блокировать Telegram
+            orders = await asyncio.to_thread(bot.fetch_orders_from_exchange)
+            new_orders = [o for o in orders if not is_order_processed(o["id"])]
+            logger.info(f"Найдено карточек: {len(orders)} | Новых необработанных: {len(new_orders)}")
 
-    # Инициализация БД
-    init_db()
-    stats = get_stats()
-    print(f"📊 Текущая статистика базы данных: {stats}\n")
+            for order in new_orders:
+                order_id = order["id"]
+                title = order["title"]
+                description = order["description"]
+                budget_info = order["budget_info"]
+                offers_count = order.get("offers_count", 0)
 
-    # Автоматическая проверка и загрузка Chromium Playwright (для облачных хостингов)
-    try:
-        import subprocess
-        print("📦 Проверка и загрузка браузера Chromium для Playwright...")
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-        print("✅ Браузер Chromium готов к запуску!\n")
-    except Exception as e:
-        logger.warning(f"Предупреждение при загрузке Chromium: {e}")
-
-    bot = KworkBot()
-
-    try:
-        bot.start_browser()
-
-        # Проверка и ожидание авторизации пользователя
-        if not bot.check_authorization():
-            logger.error("Не удалось подтвердить авторизацию. Завершение работы.")
-            return
-
-        logger.info("🚀 Запуск цикла регулярного мониторинга биржи...")
-
-        iteration = 0
-        while True:
-            iteration += 1
-            logger.info(f"\n--- [Итерация #{iteration}] Проверка биржи Kwork ---")
-
-            try:
-                orders = bot.fetch_orders_from_exchange()
-                new_orders = [o for o in orders if not is_order_processed(o["id"])]
-                logger.info(f"Новых необработанных заказов: {len(new_orders)}")
-
-                for order in new_orders:
-                    order_id = order["id"]
-                    title = order["title"]
-                    description = order["description"]
-                    budget_info = order["budget_info"]
-                    offers_count = order.get("offers_count", 0)
-
-                    # Фильтр: если предложений по заказу > MAX_EXISTING_OFFERS (по умолчанию 10), не отправляем
-                    if offers_count > config.MAX_EXISTING_OFFERS:
-                        logger.info(f"⏭️ Пропуск заказа #{order_id} ('{title}'): уже {offers_count} предложений (лимит: {config.MAX_EXISTING_OFFERS}).")
-                        save_order(
-                            kwork_id=order_id,
-                            title=title,
-                            description=description,
-                            budget_info=budget_info,
-                            is_feasible=False,
-                            reasoning=f"Превышен лимит предложений ({offers_count} > {config.MAX_EXISTING_OFFERS})",
-                            status="SKIPPED_TOO_MANY_OFFERS"
-                        )
-                        continue
-
-                    # Фильтр: если допустимый бюджет заказчика строго ниже MIN_ACCEPTABLE_PRICE, не тратим квоту AI
-                    desired, max_allowed = parse_budget_details(budget_info)
-                    if max_allowed and max_allowed < config.MIN_ACCEPTABLE_PRICE:
-                        logger.info(
-                            f"⏭️ Пропуск заказа #{order_id} ('{title}'): потолок бюджета ({max_allowed} ₽) "
-                            f"ниже минимального порога ({config.MIN_ACCEPTABLE_PRICE} ₽)."
-                        )
-                        save_order(
-                            kwork_id=order_id,
-                            title=title,
-                            description=description,
-                            budget_info=budget_info,
-                            desired_price=desired,
-                            is_feasible=False,
-                            reasoning=f"Потолок бюджета ({max_allowed} ₽) ниже минимальной планки ({config.MIN_ACCEPTABLE_PRICE} ₽)",
-                            status="SKIPPED_BUDGET_TOO_LOW"
-                        )
-                        continue
-
-                    # Фильтр: исключаем видеопродакшн, контент-заводы, видеогенерацию и монтаж
-                    forbidden_topics_pattern = (
-                        r"(?:контент[- ]завод|генераци[яиею]\s+(?:видео|ролик|рилс|reels|shorts|tiktok)|"
-                        r"видеогенераци[яиею]|видеопродакшн|создани[ея]\s+(?:видео|ролик|shorts|reels|tiktok)|"
-                        r"монтаж.*видео|съемк[аи]|видеомонтаж|озвучк[аи].*видео)"
+                # 1. Фильтр конкуренции
+                if offers_count > config.MAX_EXISTING_OFFERS:
+                    logger.info(f"⏭️ Пропуск #{order_id} ('{title}'): уже {offers_count} предложений (лимит: {config.MAX_EXISTING_OFFERS}).")
+                    save_order(
+                        kwork_id=order_id,
+                        title=title,
+                        description=description,
+                        budget_info=budget_info,
+                        is_feasible=False,
+                        reasoning=f"Превышен лимит предложений ({offers_count} > {config.MAX_EXISTING_OFFERS})",
+                        status="SKIPPED_TOO_MANY_OFFERS"
                     )
-                    full_order_text = f"{title} {description}"
-                    if re.search(forbidden_topics_pattern, full_order_text, re.IGNORECASE):
-                        logger.info(f"⏭️ Пропуск заказа #{order_id} ('{title}'): тематика контент-заводов / видеопроизводства исключена.")
-                        save_order(
-                            kwork_id=order_id,
-                            title=title,
-                            description=description,
-                            budget_info=budget_info,
-                            desired_price=desired,
-                            is_feasible=False,
-                            reasoning="Исключенная тематика: видеопродакшн / контент-заводы / генерация видео",
-                            status="SKIPPED_FORBIDDEN_TOPIC"
-                        )
-                        continue
+                    continue
 
+                # 2. Фильтр минимальной планки
+                desired, max_allowed = parse_budget_details(budget_info)
+                if max_allowed and max_allowed < config.MIN_ACCEPTABLE_PRICE:
+                    logger.info(
+                        f"⏭️ Пропуск #{order_id} ('{title}'): потолок бюджета ({max_allowed} ₽) "
+                        f"ниже минимального порога ({config.MIN_ACCEPTABLE_PRICE} ₽)."
+                    )
+                    save_order(
+                        kwork_id=order_id,
+                        title=title,
+                        description=description,
+                        budget_info=budget_info,
+                        desired_price=desired,
+                        is_feasible=False,
+                        reasoning=f"Потолок бюджета ({max_allowed} ₽) ниже минимальной планки ({config.MIN_ACCEPTABLE_PRICE} ₽)",
+                        status="SKIPPED_BUDGET_TOO_LOW"
+                    )
+                    continue
 
-                    logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (уже подано откликов: {offers_count})")
-                    logger.info(f"Бюджет: {budget_info}")
+                # 3. Фильтр исключенных тематик (видеопродакшн / контент-заводы)
+                forbidden_topics = (
+                    r"(?:контент[- ]завод|генераци[яиею]\s+(?:видео|ролик|рилс|reels|shorts|tiktok)|"
+                    r"видеогенераци[яиею]|видеопродакшн|создани[ея]\s+(?:видео|ролик|shorts|reels|tiktok)|"
+                    r"монтаж.*видео|съемк[аи]|видеомонтаж|озвучк[аи].*видео)"
+                )
+                if re.search(forbidden_topics, f"{title} {description}", re.IGNORECASE):
+                    logger.info(f"⏭️ Пропуск #{order_id} ('{title}'): видеопроизводство/контент-заводы исключены.")
+                    save_order(
+                        kwork_id=order_id,
+                        title=title,
+                        description=description,
+                        budget_info=budget_info,
+                        desired_price=desired,
+                        is_feasible=False,
+                        reasoning="Исключенная тематика: видеопродакшн / контент-заводы / генерация видео",
+                        status="SKIPPED_FORBIDDEN_TOPIC"
+                    )
+                    continue
 
-                    try:
-                        analysis = analyze_kwork_order(title, description, budget_info)
+                # 4. Анализ через Gemini
+                logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (откликов: {offers_count})")
+                try:
+                    analysis = await asyncio.to_thread(analyze_kwork_order, title, description, budget_info)
+                except Exception as e:
+                    logger.error(f"Не удалось проанализировать заказ #{order_id} через Gemini: {e}")
+                    continue
 
-                    except Exception as e:
-                        logger.error(f"Не удалось проанализировать заказ #{order_id} через Gemini: {e}")
-                        continue
-
-                    logger.info(f"Выполнимость: {'✅ ДА' if analysis.is_feasible else '❌ НЕТ'}")
-                    logger.info(f"Обоснование: {analysis.reasoning}")
-
-                    if not analysis.is_feasible:
-                        # Сохраняем как невыполнимый, чтобы больше не парсить
-                        save_order(
-                            kwork_id=order_id,
-                            title=title,
-                            description=description,
-                            budget_info=budget_info,
-                            desired_price=analysis.desired_budget,
-                            is_feasible=False,
-                            reasoning=analysis.reasoning,
-                            status="REJECTED_UNFEASIBLE"
-                        )
-                        time.sleep(3.0)
-                        continue
-
-                    # Задача выполнима — готовим отклик
-                    logger.info(f"Рекомендуемый стек: {analysis.tech_stack}")
-                    logger.info(f"Срок выполнения: {analysis.duration_days} дня")
-                    logger.info(f"Название заказа: '{analysis.proposal_title}'")
-                    logger.info(f"Желаемая цена: {analysis.desired_budget} ₽")
-                    logger.info(f"Текст отклика ({len(analysis.proposal_text)} симв.):\n{analysis.proposal_text}\n")
-
-                    # Открываем форму и заполняем
-                    success = bot.fill_and_submit_offer(order, analysis)
-                    status = ("DRY_RUN_SAVED" if config.DRY_RUN else "SUBMITTED") if success else "ERROR"
-
+                if not analysis.is_feasible:
+                    logger.info(f"❌ Заказ #{order_id} признан нецелесообразным: {analysis.reasoning}")
                     save_order(
                         kwork_id=order_id,
                         title=title,
                         description=description,
                         budget_info=budget_info,
                         desired_price=analysis.desired_budget,
-                        is_feasible=True,
+                        is_feasible=False,
                         reasoning=analysis.reasoning,
-                        tech_stack=analysis.tech_stack,
-                        proposal_title=analysis.proposal_title,
-                        proposal_text=analysis.proposal_text,
-                        duration_days=analysis.duration_days,
-                        status=status
+                        status="REJECTED_UNFEASIBLE"
                     )
+                    await asyncio.sleep(2.0)
+                    continue
 
-                    # Отправка уведомления в Telegram (с отчетом и скриншотом)
-                    if success:
-                        shot_file = config.SCREENSHOTS_DIR / f"dry_run_{order_id}.png"
-                        notify_order_offer(
-                            order_id=order_id,
-                            title=title,
-                            budget_info=budget_info,
-                            form_price=getattr(analysis, "kwork_form_price", None) or getattr(analysis, "final_offer_price", 1000),
-                            real_price=getattr(analysis, "real_suggested_price", None) or getattr(analysis, "final_offer_price", 1000),
-                            proposal_text=analysis.proposal_text,
-                            duration_days=analysis.duration_days,
-                            is_dry_run=config.DRY_RUN,
-                            screenshot_path=shot_file if shot_file.exists() else None
-                        )
+                # 5. Задача целесообразна: сохраняем в БД со статусом WAITING_APPROVAL
+                logger.info(f"✅ Заказ #{order_id} подходит! Подготовлен отклик. Отправляем в Telegram на согласование...")
+                form_price = getattr(analysis, "kwork_form_price", None) or getattr(analysis, "final_offer_price", 1000)
+                real_price = getattr(analysis, "real_suggested_price", None) or getattr(analysis, "final_offer_price", 1000)
 
-                    # Небольшая пауза между отправкой нескольких откликов
-                    time.sleep(random.uniform(4.0, 7.0))
+                save_order(
+                    kwork_id=order_id,
+                    title=title,
+                    description=description,
+                    budget_info=budget_info,
+                    desired_price=analysis.desired_budget,
+                    is_feasible=True,
+                    reasoning=analysis.reasoning,
+                    tech_stack=analysis.tech_stack,
+                    proposal_title=analysis.proposal_title,
+                    proposal_text=analysis.proposal_text,
+                    duration_days=analysis.duration_days,
+                    status="WAITING_APPROVAL"
+                )
 
-            except Exception as e:
-                logger.error(f"Ошибка во время итерации мониторинга: {e}", exc_info=True)
+                # Отправка карточки согласования с инлайн-кнопками в Telegram
+                await send_order_card_for_approval(
+                    order_id=order_id,
+                    title=title,
+                    budget_info=budget_info,
+                    desired_budget=analysis.desired_budget,
+                    suggested_price=real_price,
+                    form_price=form_price,
+                    proposal_text=analysis.proposal_text,
+                    duration_days=analysis.duration_days
+                )
 
-            # Пауза перед следующей проверкой биржи
-            delay = random.uniform(config.CHECK_INTERVAL_MIN, config.CHECK_INTERVAL_MAX)
-            logger.info(f"⏳ Ожидание {int(delay)} сек. до следующей проверки биржи...")
-            time.sleep(delay)
+                await asyncio.sleep(3.0)
 
-    except KeyboardInterrupt:
-        logger.info("\n🛑 Получен сигнал остановки пользователем (Ctrl+C).")
+        except Exception as e:
+            logger.error(f"Ошибка во время итерации мониторинга: {e}", exc_info=True)
+
+        delay = random.uniform(config.CHECK_INTERVAL_MIN, config.CHECK_INTERVAL_MAX)
+        logger.info(f"⏳ Ожидание {int(delay)} сек. до следующей проверки биржи...")
+        await asyncio.sleep(delay)
+
+async def main():
+    print("=" * 65)
+    print("🤖 KWORK AUTOMATION BOT (HUMAN-IN-THE-LOOP + AIOGRAM 3)")
+    print("=" * 65)
+
+    if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_gemini_api_key_here":
+        print("\n❌ ОШИБКА: Не задан GEMINI_API_KEY в .env!")
+        sys.exit(1)
+
+    print(f"🔹 Модель Gemini: {config.GEMINI_MODEL}")
+    print(f"🔹 URL биржи: {config.KWORK_URL}")
+    print(f"🔹 Режим DRY_RUN: {'ВКЛЮЧЕН (тест)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (боевой)'}")
+    print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (экран)'}")
+    print(f"🔹 Telegram-уведомления: {'ВКЛЮЧЕНЫ' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'ВЫКЛЮЧЕНЫ'}")
+    print("=" * 65)
+
+    # Инициализация БД
+    init_db()
+    stats = get_stats()
+    print(f"📊 Текущая статистика базы данных: {stats}\n")
+
+    # Авто-установка Chromium Playwright для облака
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        logger.warning(f"Предупреждение при загрузке Chromium: {e}")
+
+    # Инициализируем браузер
+    bot_browser = KworkBot()
+    bot_browser.start_browser()
+
+    if not bot_browser.check_authorization():
+        logger.error("Не удалось подтвердить авторизацию в Kwork. Завершение работы.")
+        bot_browser.close_browser()
+        return
+
+    # Регистрируем обработчик для кнопки "Отправить отклик" из Telegram
+    async def handle_telegram_approval(order_id: str):
+        order_data = get_order_by_id(order_id)
+        if not order_data:
+            return False, None, f"Заказ #{order_id} не найден в базе данных"
+
+        # Вызываем метод отправки в отдельном потоке, так как Playwright синхронный
+        return await asyncio.to_thread(
+            bot_browser.submit_proposal_by_id,
+            order_id=order_id,
+            proposal_title=order_data.get("proposal_title") or f"Заказ #{order_id}",
+            proposal_text=order_data.get("proposal_text") or "",
+            price=order_data.get("desired_price") or 1000,
+            duration_days=order_data.get("duration_days") or 3
+        )
+
+    set_approve_handler(handle_telegram_approval)
+
+    # Отправляем приветственное сообщение в Telegram
+    t_bot = get_bot()
+    if t_bot and config.TELEGRAM_CHAT_ID:
+        try:
+            await t_bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text="🟢 <b>Kwork Automation Bot запущен в режиме согласования!</b>\n"
+                     "Когда бот найдет подходящий заказ, вы получите сообщение с кнопками <b>[🚀 Отправить]</b> и <b>[❌ Пропустить]</b>."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить стартовое сообщение в Telegram: {e}")
+
+    try:
+        # Запускаем одновременно Telegram-бота и фоновый цикл парсера
+        await asyncio.gather(
+            start_telegram_polling(),
+            run_parser_loop(bot_browser)
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("\n🛑 Остановка приложения пользователем...")
     finally:
-        logger.info("Завершение сессии и сохранение состояния браузера...")
-        bot.close_browser()
-        logger.info("Бот остановлен.")
+        logger.info("Закрытие браузера Playwright...")
+        bot_browser.close_browser()
+        if t_bot:
+            await t_bot.session.close()
+        logger.info("Приложение полностью остановлено.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
