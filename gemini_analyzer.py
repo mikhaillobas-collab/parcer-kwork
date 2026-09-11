@@ -224,7 +224,13 @@ def analyze_kwork_order(
     )
 
     models_to_try = [GEMINI_MODEL]
-    fallback_models = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.7-flash", "gemini-3.8-flash"]
+    fallback_models = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-flash-latest"
+    ]
     for m in fallback_models:
         if m not in models_to_try:
             models_to_try.append(m)
