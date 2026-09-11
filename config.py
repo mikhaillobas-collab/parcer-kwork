@@ -8,7 +8,7 @@ load_dotenv(BASE_DIR / ".env")
 
 # Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # URL страницы биржи с настроенными фильтрами
 # Пользователь может скопировать полный URL из адресной строки браузера со своими фильтрами
