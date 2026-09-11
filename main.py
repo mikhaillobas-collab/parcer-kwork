@@ -38,8 +38,7 @@ async def run_parser_loop(bot: KworkBot):
         logger.info(f"\n--- [Итерация #{iteration}] Проверка биржи Kwork ---")
 
         try:
-            # Запускаем синхронные операции парсера в отдельном потоке, чтобы не блокировать Telegram
-            orders = await asyncio.to_thread(bot.fetch_orders_from_exchange)
+            orders = await bot.fetch_orders_from_exchange()
             new_orders = [o for o in orders if not is_order_processed(o["id"])]
             logger.info(f"Найдено карточек: {len(orders)} | Новых необработанных: {len(new_orders)}")
 
@@ -197,11 +196,11 @@ async def main():
 
     # Инициализируем браузер
     bot_browser = KworkBot()
-    bot_browser.start_browser()
+    await bot_browser.start_browser()
 
-    if not bot_browser.check_authorization():
+    if not await bot_browser.check_authorization():
         logger.error("Не удалось подтвердить авторизацию в Kwork. Завершение работы.")
-        bot_browser.close_browser()
+        await bot_browser.close_browser()
         return
 
     # Регистрируем обработчик для кнопки "Отправить отклик" из Telegram
@@ -210,9 +209,7 @@ async def main():
         if not order_data:
             return False, None, f"Заказ #{order_id} не найден в базе данных"
 
-        # Вызываем метод отправки в отдельном потоке, так как Playwright синхронный
-        return await asyncio.to_thread(
-            bot_browser.submit_proposal_by_id,
+        return await bot_browser.submit_proposal_by_id(
             order_id=order_id,
             proposal_title=order_data.get("proposal_title") or f"Заказ #{order_id}",
             proposal_text=order_data.get("proposal_text") or "",
@@ -244,7 +241,7 @@ async def main():
         logger.info("\n🛑 Остановка приложения пользователем...")
     finally:
         logger.info("Закрытие браузера Playwright...")
-        bot_browser.close_browser()
+        await bot_browser.close_browser()
         if t_bot:
             await t_bot.session.close()
         logger.info("Приложение полностью остановлено.")
