@@ -1,5 +1,6 @@
 import logging
 import random
+import re
 import sys
 import time
 
@@ -125,6 +126,27 @@ def main():
                             is_feasible=False,
                             reasoning=f"Потолок бюджета ({max_allowed} ₽) ниже минимальной планки ({config.MIN_ACCEPTABLE_PRICE} ₽)",
                             status="SKIPPED_BUDGET_TOO_LOW"
+                        )
+                        continue
+
+                    # Фильтр: исключаем видеопродакшн, контент-заводы, видеогенерацию и монтаж
+                    forbidden_topics_pattern = (
+                        r"(?:контент[- ]завод|генераци[яиею]\s+(?:видео|ролик|рилс|reels|shorts|tiktok)|"
+                        r"видеогенераци[яиею]|видеопродакшн|создани[ея]\s+(?:видео|ролик|shorts|reels|tiktok)|"
+                        r"монтаж.*видео|съемк[аи]|видеомонтаж|озвучк[аи].*видео)"
+                    )
+                    full_order_text = f"{title} {description}"
+                    if re.search(forbidden_topics_pattern, full_order_text, re.IGNORECASE):
+                        logger.info(f"⏭️ Пропуск заказа #{order_id} ('{title}'): тематика контент-заводов / видеопроизводства исключена.")
+                        save_order(
+                            kwork_id=order_id,
+                            title=title,
+                            description=description,
+                            budget_info=budget_info,
+                            desired_price=desired,
+                            is_feasible=False,
+                            reasoning="Исключенная тематика: видеопродакшн / контент-заводы / генерация видео",
+                            status="SKIPPED_FORBIDDEN_TOPIC"
                         )
                         continue
 
