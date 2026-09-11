@@ -10,6 +10,15 @@ logger = logging.getLogger("kwork_bot")
 def is_telegram_configured() -> bool:
     return bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
+def get_opener():
+    if config.GEMINI_PROXY:
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": config.GEMINI_PROXY,
+            "https": config.GEMINI_PROXY
+        })
+        return urllib.request.build_opener(proxy_handler)
+    return urllib.request.build_opener()
+
 def send_telegram_message(text: str) -> bool:
     if not is_telegram_configured():
         return False
@@ -25,7 +34,8 @@ def send_telegram_message(text: str) -> bool:
     try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        opener = get_opener()
+        with opener.open(req, timeout=15) as response:
             res_data = json.loads(response.read().decode())
             return res_data.get("ok", False)
     except Exception as e:
@@ -79,7 +89,8 @@ def send_telegram_photo(photo_path: Union[str, Path], caption: str = "") -> bool
             data=bytes(body),
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
-        with urllib.request.urlopen(req, timeout=20) as response:
+        opener = get_opener()
+        with opener.open(req, timeout=30) as response:
             res_data = json.loads(response.read().decode())
             return res_data.get("ok", False)
     except Exception as e:
