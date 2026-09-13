@@ -89,6 +89,15 @@ class ProposalAnalysis(BaseModel):
         default=3000,
         description="Итоговая стоимость для поля формы Kwork (равна kwork_form_price)."
     )
+    client_requested_cases: bool = Field(
+        default=False,
+        description=(
+            "True ТОЛЬКО если заказчик в тексте заказа сам просит показать кейсы, портфолио, примеры выполненных работ "
+            "или спрашивает, делал ли исполнитель похожие проекты / есть ли опыт в подобных задачах. "
+            "False, если заказчик об этом не просит: просто описывает задачу, перечисляет требования к навыкам "
+            "('нужен опыт с Python', 'опыт — большой плюс') или слово 'кейс' употреблено в другом смысле (кейсы CS2, бизнес-кейс)."
+        )
+    )
     proposal_text: str = Field(
 
         default="",
@@ -99,6 +108,7 @@ class ProposalAnalysis(BaseModel):
             "3) Краткое описание стека и архитектуры. "
             "4) Если цена отличается от желаемого бюджета 500 руб. (заглушки) — деликатно обосновать цену объемом работ и качеством. "
             "5) Готовность обсудить детали и приступить к работе. "
+            "Фразу про отсутствие кейсов включать ТОЛЬКО если client_requested_cases = true, иначе кейсы и портфолио не упоминать. "
             "Тон: уверенный, профессиональный разработчик (НЕ упоминать, что вы ИИ/нейросеть/бот!)."
         )
     )
@@ -136,6 +146,52 @@ def parse_budget_details(budget_str: str) -> Tuple[Optional[int], Optional[int]]
             max_allowed = int(m)
 
     return desired, max_allowed
+
+CASES_PHRASE = "Кейсов именно в этой нише нет, но стек и проект понятен, сделать не проблема."
+
+# Без этих слов в тексте заказа просьбы о кейсах / примерах работ точно нет
+CASES_MENTION_RE = re.compile(
+    r"кейс|портфолио|(?<!на)пример|опыт|похож|аналогичн|подобн|ранее\s+(?:выполн|сдел|реализ)|уже\s+делал",
+    re.IGNORECASE
+)
+
+# Предложение отклика о том, что кейсов / портфолио / примеров работ нет
+_CASES_WORDS = r"(?:кейс|портфолио|(?<!на)пример\w*\s+(?:\w+\s+)?работ)"
+_ABSENCE_WORDS = r"(?:\bнет\b|отсутству|не\s+было|не\s+имею)"
+NO_CASES_SENTENCE_RE = re.compile(
+    rf"{_CASES_WORDS}[^.!?\n]*{_ABSENCE_WORDS}|{_ABSENCE_WORDS}[^.!?\n]*{_CASES_WORDS}",
+    re.IGNORECASE
+)
+
+def apply_cases_phrase_rule(text: str, client_requested_cases: bool) -> str:
+    """
+    Фраза про отсутствие кейсов нужна в отклике, только если заказчик сам просит кейсы / примеры работ:
+    при просьбе — добавляется, если модель её пропустила; без просьбы — такие предложения удаляются.
+    """
+    if not text:
+        return text
+
+    if client_requested_cases:
+        if re.search(_CASES_WORDS, text, re.IGNORECASE):
+            return text
+        # Вставляем после приветствия и понимания задачи
+        if "\n" in text:
+            sep = "\n\n" if "\n\n" in text else "\n"
+            parts = text.split(sep)
+            parts.insert(2 if len(parts) > 2 and len(parts[0]) <= 40 else 1, CASES_PHRASE)
+            return sep.join(parts)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        sentences.insert(min(2, len(sentences)), CASES_PHRASE)
+        return " ".join(sentences)
+
+    if not NO_CASES_SENTENCE_RE.search(text):
+        return text
+    lines = []
+    for line in text.split("\n"):
+        kept = [s for s in re.split(r"(?<=[.!?])\s+", line) if not NO_CASES_SENTENCE_RE.search(s)]
+        if kept or not line.strip():
+            lines.append(" ".join(kept))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 def analyze_kwork_order(
     title: str,
@@ -192,12 +248,16 @@ def analyze_kwork_order(
         "СТРОГО ПРОПУСКАЕМ ЗАКАЗ (is_feasible = False, reasoning = 'Тематика видеопродакшна и контент-заводов не входит в наш профиль').\n"
         "   - Если же задача требует ручной работы в визуальных конструкторах ботов/связок (Salebot, Bothelp, Senler, ManyChat, LeadConverter, Make, Albato) "
         "и нужны готовые кейсы — ПРОПУСКАЕМ заказ! (is_feasible = False, reasoning = 'Требуется ручная настройка в no-code конструкторах ботов/связок, готовых кейсов нет').\n"
-        "   - Если заказчик в ТЗ просит кейсы по программным задачам (код на Python, парсеры, Telegram-боты, API): пиши в отклике: "
-        "'Кейсов именно в этой нише нет, но стек и проект понятен, сделать не проблема.'\n"
+        "4. ФРАЗА ПРО КЕЙСЫ (поле client_requested_cases):\n"
+        "   - client_requested_cases = true ТОЛЬКО если заказчик сам просит кейсы, портфолио, примеры выполненных работ "
+        "или спрашивает о похожих выполненных проектах / опыте в подобных задачах.\n"
+        f"   - Только в этом случае добавь в отклик фразу: '{CASES_PHRASE}'\n"
+        "   - Если заказчик об этом не просит (просто описывает задачу, перечисляет требования к навыкам) — "
+        "client_requested_cases = false, и в отклике НЕ упоминай кейсы, портфолио, примеры работ и их отсутствие.\n"
         "6. Структура отклика (proposal_text):\n"
         "   - Приветствие.\n"
         "   - Подтверждение понимания задачи (доработка или разработка, ключевые методы и технологии).\n"
-        "   - Если заказчик спрашивал кейсы — фраза: 'Кейсов именно в этой теме нет, но стек и проект понятен, сделать не проблема.'\n"
+        "   - Фраза про кейсы — строго по правилу 4 (только если client_requested_cases = true).\n"
         "   - Краткий стек технологий и план решения.\n"
         "   - Обоснование цены (с учетом вилки платформы и реального предложения).\n"
         "   - Длина: СТРОГО от 160 до 1900 символов (требование Kwork: не менее 150 символов!).\n"
@@ -284,6 +344,19 @@ def analyze_kwork_order(
                 # Срок строго 2 или 3 дня
                 if result.duration_days not in (2, 3):
                     result.duration_days = 2 if result.duration_days <= 2 else 3
+
+                # Фраза про отсутствие кейсов — только если заказчик сам просит кейсы / примеры работ
+                result.client_requested_cases = result.client_requested_cases and bool(
+                    CASES_MENTION_RE.search(f"{title}\n{description}")
+                )
+                proposal_before = result.proposal_text
+                result.proposal_text = apply_cases_phrase_rule(proposal_before, result.client_requested_cases)
+                if result.proposal_text != proposal_before:
+                    logger.info(
+                        "Фраза про кейсы добавлена: заказчик просит кейсы, а Gemini её пропустил"
+                        if result.client_requested_cases else
+                        "Фраза про кейсы удалена: заказчик не просит кейсы"
+                    )
 
                 # Минимальная длина отклика Kwork (не менее 150 символов)
                 if result.is_feasible and len(result.proposal_text.strip()) < 150:
