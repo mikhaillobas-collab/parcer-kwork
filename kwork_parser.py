@@ -1,6 +1,7 @@
 import asyncio
 import json
 import base64
+import html
 import logging
 import re
 import sys
@@ -15,11 +16,62 @@ from gemini_analyzer import analyze_kwork_order
 
 logger = logging.getLogger("kwork_bot")
 
+# Состояние формы отклика на kwork.ru/new_offer так, как его видит Kwork.
+# values — значения из Vue-компонента поля: проверяемое Kwork перед отправкой и отправляемое (v-model).
+OFFER_FORM_STATE_JS = r"""() => {
+    const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    const editorField = name => {
+        const textarea = document.querySelector(`textarea[name="${name}"]`);
+        const box = textarea ? textarea.closest('.trumbowyg-box') : null;
+        const editor = box ? box.querySelector('.trumbowyg-editor') : null;
+        let values = null, counter = null, counterError = false, textError = '';
+        for (let el = textarea, i = 0; el && i < 12; el = el.parentElement, i++) {
+            const vm = el.__vue__;
+            if (vm && 'textPreSubmitMessage' in vm) {
+                values = [String(vm.textPreSubmitMessage || '')];
+                if (typeof vm.value === 'string') values.push(vm.value);
+                // Счётчик символов Kwork: при ошибке счётчика Kwork не даёт отправить форму
+                counter = typeof vm.lengthValue === 'number' ? vm.lengthValue : null;
+                counterError = !!vm.errorTextCounter;
+                textError = clean(vm.textError);
+                break;
+            }
+        }
+        return {visible: visible(editor), text: editor ? editor.innerText.trim() : '', values, counter, counterError, textError};
+    };
+    const price = document.querySelector('#offer-custom-price');
+    const payment = document.querySelector('.offer-payment-type__items');
+    const duration = document.querySelector('.duration-select');
+    // Выбранный срок Kwork показывает значением input внутри .vs__selected
+    const selected = duration ? duration.querySelector('.vs__selected') : null;
+    const selectedInput = selected ? selected.querySelector('input') : null;
+    return {
+        description: editorField('description'),
+        name: editorField('name'),
+        priceVisible: visible(price),
+        price: price ? price.value : '',
+        paymentVisible: visible(payment),
+        paymentChosen: !!(payment && payment.querySelector('.offer-payment-type__item.active')),
+        durationVisible: visible(duration),
+        duration: selectedInput ? clean(selectedInput.value) : clean(selected ? selected.textContent : ''),
+        errors: [...document.querySelectorAll('.form-item__error, .offer-individual__error, .offer-individual__total-price-error')]
+            .filter(visible).map(el => clean(el.textContent)).filter(Boolean),
+    };
+}"""
+
+VISIBLE_POPUPS_JS = r"""() => [...document.querySelectorAll(".modal, .kw-modal, .vm--modal, [role='dialog']")]
+    .filter(el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden')
+    .map(el => el.innerText.replace(/\s+/g, ' ').trim().slice(0, 300))
+    .filter(Boolean)"""
+
 class KworkBot:
     def __init__(self):
         self.playwright = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        # Заказы, по которым сейчас идёт отправка отклика (защита от двойного нажатия в Telegram)
+        self._submitting: set = set()
 
     async def start_browser(self) -> None:
         """Запускает браузер с постоянным профилем сессии через асинхронный Playwright."""
@@ -240,147 +292,359 @@ class KworkBot:
         duration_days: int = 3
     ) -> Tuple[bool, Optional[Path], str]:
         """
-        Открывает страницу заказа, заполняет форму и отправляет её на Kwork.
+        Открывает форму отклика (kwork.ru/new_offer?project=ID), заполняет её и отправляет на Kwork.
+        Работает в отдельной вкладке, чтобы не мешать циклу мониторинга биржи в self.page.
         Возвращает: (успех, путь_к_скриншоту, текст_ошибки).
         """
-        await self.ensure_browser_alive()
+        order_id = str(order_id)
+        if order_id in self._submitting:
+            return False, None, "Отклик на этот заказ уже отправляется"
+        self._submitting.add(order_id)
+
+        page: Optional[Page] = None
         try:
-            url = f"https://kwork.ru/projects/{order_id}/view"
-            logger.info(f"Открытие страницы проекта: {url}...")
-            await self.page.goto(url, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
-
-            # Ищем кнопку "Предложить услугу"
-            offer_btn = self.page.locator(
-                ".kw-button--green:has-text('Предложить услугу'), "
-                "button:has-text('Предложить услугу'), "
-                "a:has-text('Предложить услугу'), "
-                "span:has-text('Предложить услугу'):not(.want-card__open-review)"
-            ).first
-
-            if not await offer_btn.is_visible():
-                # Проверяем, возможно форма уже открыта на странице
-                if await self.page.locator("textarea[placeholder*='Напишите, как вы будете решать'], textarea[name='description']").count() == 0:
-                    return False, None, "Кнопка 'Предложить услугу' недоступна (проект закрыт или отклик уже подан)"
-
-            if await offer_btn.is_visible():
-                await offer_btn.scroll_into_view_if_needed()
-                await offer_btn.click(force=True)
-                await asyncio.sleep(2)
-
-            # Ожидаем появления поля textarea (в модальном окне или на странице)
-            desc_textarea = None
-            selectors = [
-                ".modal-dialog textarea",
-                ".modal-content textarea",
-                ".b-modal textarea",
-                ".popup textarea",
-                "textarea[placeholder*='Напишите, как вы будете решать']",
-                "textarea[name='description']",
-                "textarea"
-            ]
-
-            for attempt in range(3):
-                for sel in selectors:
-                    loc = self.page.locator(sel).first
-                    if await loc.count() > 0 and await loc.is_visible():
-                        desc_textarea = loc
-                        break
-                if desc_textarea:
-                    break
-                await asyncio.sleep(1)
-
-            if not desc_textarea:
-                # Делаем скриншот страницы, чтобы точно увидеть состояние экрана
-                err_shot = config.SCREENSHOTS_DIR / f"notextarea_{order_id}.png"
-                await self.page.screenshot(path=str(err_shot), full_page=True)
-                return False, err_shot, "Поле ввода отклика (textarea) не появилось после клика на кнопку предложения"
-
-            await desc_textarea.scroll_into_view_if_needed()
-            await desc_textarea.click()
-            await desc_textarea.fill(proposal_text)
-            try:
-                handle = await desc_textarea.element_handle()
-                await self.page.evaluate("""(el) => {
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                }""", handle)
-            except Exception:
-                pass
-
-            # 2. Поле Стоимость
-            price_input = self.page.locator("input[placeholder*=' - '], input[name='price'], div:has-text('Стоимость') + div input, div:has-text('Стоимость') input").first
-            if await price_input.is_visible() and price:
-                placeholder = await price_input.get_attribute("placeholder") or ""
-                ph_clean = placeholder.replace(" ", "").replace("\xa0", "")
-                range_match = re.findall(r"\d+", ph_clean)
-                target_price = price
-                if len(range_match) >= 2:
-                    max_limit = int(range_match[-1])
-                    if target_price > max_limit:
-                        target_price = max_limit
-                await price_input.fill(str(target_price))
-
-            # 3. Поле Название
-            title_input = self.page.locator("input[placeholder*='Введите название заказа'], input[name='title']").first
-            if await title_input.is_visible():
-                await title_input.fill(proposal_title[:70])
-
-            # 4. Срок
-            duration = duration_days if duration_days in (2, 3) else 3
-            duration_select = self.page.locator("select[name*='term'], select[name*='duration'], select").first
-            if await duration_select.is_visible():
-                try:
-                    await duration_select.select_option(label=re.compile(f"{duration}"))
-                except Exception:
-                    await duration_select.select_option(value=str(duration))
-            else:
-                dropdown_trigger = self.page.locator("div:has-text('Срок выполнения'), .duration-select, .select-styled").last
-                if await dropdown_trigger.is_visible():
-                    await dropdown_trigger.click()
-                    await asyncio.sleep(1)
-                    option_item = self.page.locator(f"li:has-text('{duration} дн'), div:has-text('{duration} дн'), span:has-text('{duration} дн')").first
-                    if await option_item.is_visible():
-                        await option_item.click()
-                        await asyncio.sleep(0.5)
-
-            # Скриншот
-            shot_file = config.SCREENSHOTS_DIR / f"offer_{order_id}.png"
-            try:
-                if await modal.is_visible():
-                    await modal.screenshot(path=str(shot_file))
-                else:
-                    await self.page.screenshot(path=str(shot_file), full_page=False)
-            except Exception:
-                await self.page.screenshot(path=str(shot_file), full_page=False)
-
-            if config.DRY_RUN:
-                logger.info(f"🛡️ [DRY_RUN] Отклик на #{order_id} подтвержден, моделируем отправку.")
-                close_btn = self.page.locator("button.close, .modal-close, span:has-text('✕'), .popup-close").first
-                if await close_btn.is_visible():
-                    await close_btn.click()
-                else:
-                    await self.page.keyboard.press("Escape")
-                return True, shot_file, ""
-
-            # Реальная отправка
-            submit_btn = self.page.locator("button:has-text('Предложить'), input[type='submit'][value='Предложить']").first
-            await submit_btn.click()
-            await asyncio.sleep(3)
-            logger.info(f"✅ Отклик на заказ #{order_id} успешно отправлен на Kwork!")
-
-            confirm_shot = config.SCREENSHOTS_DIR / f"sent_{order_id}.png"
-            try:
-                await self.page.screenshot(path=str(confirm_shot), full_page=False)
-                return True, confirm_shot, ""
-            except Exception:
-                return True, shot_file, ""
-
+            await self.ensure_browser_alive()
+            page = await self.context.new_page()
+            page.set_default_timeout(20000)
+            return await self._fill_and_send_offer(
+                page, order_id, proposal_title, proposal_text, price, duration_days
+            )
         except Exception as e:
             logger.error(f"❌ Ошибка отправки отклика #{order_id}: {e}")
-            err_shot = config.SCREENSHOTS_DIR / f"err_{order_id}.png"
+            err_text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+            err_shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+            return False, err_shot, err_text
+        finally:
+            self._submitting.discard(order_id)
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+    async def _fill_and_send_offer(
+        self,
+        page: Page,
+        order_id: str,
+        proposal_title: str,
+        proposal_text: str,
+        price: int,
+        duration_days: int
+    ) -> Tuple[bool, Optional[Path], str]:
+        url = f"https://kwork.ru/projects/{order_id}/view"
+        logger.info(f"Открытие страницы проекта: {url}...")
+        await page.goto(url, wait_until="domcontentloaded")
+
+        # 1. Кнопка "Предложить услугу" ведёт на отдельную страницу формы /new_offer?project=ID
+        offer_btn = page.locator(
+            ".projects-offer-btn, .kw-button--green:not(.want-card__open-review), button, a"
+        ).filter(has_text="Предложить услугу").first
+        if not await self._wait_visible(offer_btn, 10000):
+            shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+            return False, shot, "Кнопка 'Предложить услугу' недоступна (проект закрыт или отклик уже подан)"
+
+        popups_before = await self._visible_popup_texts(page)
+        await offer_btn.scroll_into_view_if_needed()
+        try:
+            await offer_btn.click(timeout=10000)
+        except PlaywrightTimeoutError:
+            await offer_btn.click(force=True)
+
+        try:
+            await page.wait_for_url(re.compile(r"/new_offer"), wait_until="domcontentloaded", timeout=20000)
+        except PlaywrightTimeoutError:
+            # Вместо формы Kwork показал окно (закончились коннекты, нужно портфолио и т.п.)
+            popup = await self._new_popup_text(page, popups_before)
+            shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+            return False, shot, "Kwork не открыл форму отклика" + (f": {popup}" if popup else "")
+
+        # 2. Описание. На Kwork это визуальный редактор Trumbowyg: видимый div[contenteditable]
+        # и скрытая textarea под ним. Kwork берёт текст из редактора, поэтому вводим именно туда.
+        if not await self._wait_visible(self._editor_locator(page, "description"), 20000):
+            shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+            return False, shot, "Форма отклика не загрузилась: нет поля 'Описание'"
+        await self._type_into_editor(page, "description", proposal_text)
+
+        # 3. Стоимость: цена по правилам бота в пределах диапазона формы (подсказка поля "500 - 1 000")
+        price_input = page.locator("#offer-custom-price").first
+        if await price_input.is_visible():
+            min_price, max_price = self._parse_price_range(await price_input.get_attribute("placeholder") or "")
+            target_price = int(price or 0)
+            if max_price and target_price > max_price:
+                target_price = max_price
+            if min_price and target_price < min_price:
+                target_price = min_price
+            if target_price != price:
+                logger.info(
+                    f"Цена {price} ₽ вне диапазона формы Kwork ({min_price} - {max_price} ₽), "
+                    f"в форму вводится {target_price} ₽"
+                )
+            await price_input.fill(str(target_price))
+            await price_input.evaluate("el => el.blur()")
+
+        # 4. Порядок оплаты (появляется при цене от ~4 000 ₽): "Целиком, когда заказ выполнен".
+        # Вариант "По мере выполнения задач" требует расписывать этапы.
+        payment_all = page.locator(".offer-payment-type__item").filter(has_text="Целиком").first
+        if await self._wait_visible(payment_all, 1500):
+            await payment_all.click()
+
+        # 5. Название заказа — тоже редактор Trumbowyg, появляется после ввода цены
+        if await self._wait_visible(self._editor_locator(page, "name"), 3000):
+            await self._type_into_editor(page, "name", " ".join((proposal_title or "").split())[:70])
+
+        # 6. Срок выполнения — выпадающий список vue-select
+        await self._select_duration(page, duration_days if duration_days in (2, 3) else 3)
+
+        # 7. Проверяем, что Kwork действительно принял значения полей
+        await asyncio.sleep(0.5)
+        state = await self._read_offer_form(page)
+        problems = self._offer_form_problems(state, proposal_text)
+        form_shot = await self._offer_screenshot(page, f"offer_{order_id}.png")
+        if problems:
+            return False, form_shot, "Форма отклика заполнена с ошибками: " + "; ".join(problems)
+        logger.info(
+            f"Форма отклика #{order_id} заполнена: описание {state['description']['counter']} симв. (по счётчику Kwork), "
+            f"цена {state['price']} ₽, срок '{state['duration']}'"
+        )
+
+        if config.DRY_RUN:
+            logger.info(f"🛡️ [DRY_RUN] Отклик на #{order_id} заполнен, кнопка 'Предложить' не нажимается.")
+            return True, form_shot, ""
+
+        # 8. Отправка и проверка ответа сервера Kwork
+        submit_btn = page.locator(
+            ".modal-individual-offer__buttons button, .offer-buttons button"
+        ).filter(has_text="Предложить").first
+        if not await self._wait_visible(submit_btn, 5000):
+            return False, form_shot, "В форме не найдена кнопка 'Предложить'"
+
+        offer_results: List[Tuple[int, Any]] = []
+
+        async def collect_offer_response(response) -> None:
+            if "/api/offer/createoffer" not in response.url and "/api/offer/editoffer" not in response.url:
+                return
             try:
-                await self.page.screenshot(path=str(err_shot))
+                data = await response.json()
             except Exception:
-                pass
-            return False, err_shot, str(e)
+                data = None
+            offer_results.append((response.status, data))
+
+        page.on("response", collect_offer_response)
+        popups_before = await self._visible_popup_texts(page)
+        logger.info(f"🚀 Отправка отклика на заказ #{order_id}...")
+        await submit_btn.click()
+
+        for tick in range(60):  # до 30 секунд
+            await asyncio.sleep(0.5)
+            if offer_results:
+                break
+            if tick < 3:
+                continue
+            # Запрос на создание отклика не ушёл: ошибка проверки формы или окно-предупреждение Kwork
+            try:
+                popup = await self._new_popup_text(page, popups_before)
+                errors = (await self._read_offer_form(page))["errors"]
+            except Exception:
+                continue  # страница перезагружается
+            if popup or errors:
+                shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+                return False, shot, "Kwork не принял отклик: " + (popup or "; ".join(errors))
+
+        if not offer_results:
+            shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+            return False, shot, "Kwork не ответил на отправку отклика за 30 секунд"
+
+        status, data = offer_results[0]
+        if isinstance(data, dict):
+            accepted = status < 400 and data.get("status") != "error" and data.get("success") is not False
+        else:
+            # Тело ответа не прочиталось: при успехе Kwork уводит со страницы формы
+            await asyncio.sleep(2)
+            accepted = status < 400 and "/new_offer" not in page.url
+
+        if accepted:
+            logger.info(f"✅ Kwork принял отклик на заказ #{order_id}: {json.dumps(data, ensure_ascii=False)[:300]}")
+            return True, form_shot, ""
+
+        reason = self._offer_error_text(data) or f"HTTP {status}"
+        logger.error(f"❌ Kwork отклонил отклик на заказ #{order_id}: {reason}")
+        await asyncio.sleep(1)
+        shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+        return False, shot, f"Kwork отклонил отклик: {reason}"
+
+    @staticmethod
+    def _editor_locator(page: Page, field_name: str):
+        """Видимый редактор Trumbowyg для поля формы (textarea[name=...] под ним скрыта)."""
+        return page.locator(f".trumbowyg-box:has(textarea[name='{field_name}']) .trumbowyg-editor").first
+
+    async def _type_into_editor(self, page: Page, field_name: str, text: str) -> None:
+        """
+        Ввод текста в редактор Kwork так, как это делает пользователь: фокус, очистка черновика, текст построчно.
+        Счётчик символов Kwork пересчитывается по событию input, но берёт текст из скрытой textarea,
+        которая синхронизируется с редактором только по keyup. Поэтому в конце: End (keyup, текст не меняет)
+        и событие input — иначе счётчик остаётся устаревшим (0 или без последней строки) и Kwork не примет форму.
+        """
+        text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        editor = self._editor_locator(page, field_name)
+        await editor.scroll_into_view_if_needed()
+        await editor.click()
+        await page.keyboard.press("ControlOrMeta+A")
+        await page.keyboard.press("Delete")
+        for i, line in enumerate(text.split("\n")):
+            if i:
+                await page.keyboard.press("Enter")
+            if line:
+                await page.keyboard.insert_text(line)
+
+        for _ in range(3):
+            await page.keyboard.press("End")
+            await editor.dispatch_event("input")
+            await asyncio.sleep(0.3)
+            field = (await self._read_offer_form(page))[field_name]
+            if self._field_synced(field, text):
+                break
+            await editor.click()
+        await editor.evaluate("el => el.blur()")
+
+    async def _select_duration(self, page: Page, days: int) -> None:
+        """Выбор срока в выпадающем списке Kwork: точное совпадение или ближайший больший срок."""
+        select = page.locator(".duration-select").first
+        if not await self._wait_visible(select, 3000):
+            return
+        await select.scroll_into_view_if_needed()
+        await select.locator(".vs__dropdown-toggle").click()
+        options = page.locator(".vs__dropdown-menu .vs__dropdown-option")
+        if await self._wait_visible(options.first, 3000):
+            available = []
+            for idx, label in enumerate(await options.all_inner_texts()):
+                match = re.match(r"\s*(\d+)", label)
+                if match:
+                    available.append((int(match.group(1)), idx))
+            if available:
+                exact = [idx for value, idx in available if value == days]
+                longer = sorted((value, idx) for value, idx in available if value > days)
+                pick = exact[0] if exact else (longer[0][1] if longer else max(available)[1])
+                await options.nth(pick).click()
+                return
+        # Запасной вариант: поле поиска списка принимает число дней
+        await select.locator("input.vs__search").fill(str(days))
+        await page.keyboard.press("Enter")
+
+    async def _read_offer_form(self, page: Page) -> Dict[str, Any]:
+        """Текущее состояние формы отклика так, как его видит Kwork."""
+        return await page.evaluate(OFFER_FORM_STATE_JS)
+
+    @classmethod
+    def _offer_form_problems(cls, state: Dict[str, Any], proposal_text: str) -> List[str]:
+        """Незаполненные поля и ошибки формы отклика."""
+        problems = []
+        description = state["description"]
+        expected_chars = len(re.sub(r"\s", "", proposal_text or ""))
+        got_chars = cls._field_chars(description)
+        if got_chars == 0:
+            problems.append("описание не заполнено")
+        elif got_chars < expected_chars * 0.98:
+            problems.append(f"в описание попало {got_chars} из {expected_chars} знаков")
+        if description["counterError"]:
+            problems.append(f"счётчик символов Kwork показывает ошибку в описании ({description['counter']} симв.)")
+
+        name = state["name"]
+        if name["visible"] and cls._field_chars(name) == 0:
+            problems.append("не заполнено название заказа")
+        if name["visible"] and name["counterError"]:
+            problems.append(f"счётчик символов Kwork показывает ошибку в названии ({name['counter']} симв.)")
+        problems.extend(field["textError"] for field in (description, name) if field["textError"])
+        if state["priceVisible"] and not re.sub(r"\D", "", state["price"] or ""):
+            problems.append("не указана стоимость")
+        if state["paymentVisible"] and not state["paymentChosen"]:
+            problems.append("не выбран порядок оплаты")
+        if state["durationVisible"] and not state["duration"]:
+            problems.append("не выбран срок выполнения")
+        problems.extend(state["errors"])
+        return problems
+
+    @staticmethod
+    def _parse_price_range(placeholder: str) -> Tuple[Optional[int], Optional[int]]:
+        """'500 - 1 000' -> (500, 1000). Разделитель тысяч может быть любым пробельным символом."""
+        numbers = [re.sub(r"\D", "", part) for part in re.split(r"[-–—]", placeholder)]
+        numbers = [int(n) for n in numbers if n]
+        if len(numbers) >= 2:
+            return numbers[0], numbers[-1]
+        return None, None
+
+    @staticmethod
+    def _plain_text(value: Optional[str]) -> str:
+        """HTML -> обычный текст."""
+        return html.unescape(re.sub(r"<[^>]+>", " ", value or ""))
+
+    @classmethod
+    def _field_chars(cls, field: Dict[str, Any]) -> int:
+        """Сколько непробельных знаков текста реально лежит в поле Kwork (минимум по всем его значениям)."""
+        values = field["values"] if field["values"] is not None else [field["text"]]
+        return min(len(re.sub(r"\s", "", cls._plain_text(value))) for value in values)
+
+    @classmethod
+    def _field_synced(cls, field: Dict[str, Any], text: str) -> bool:
+        """Текст целиком дошёл до Kwork, и счётчик символов Kwork его учёл."""
+        if field["values"] is None:  # внутреннее состояние Kwork недоступно — проверить нечем
+            return True
+        if cls._field_chars(field) < len(re.sub(r"\s", "", text)) * 0.98:
+            return False
+        # Kwork считает длину, схлопывая повторяющиеся пробелы и переводы строк
+        kwork_length = len(re.sub(r"[\n ]{2,}", "\n", re.sub(r" {2,}", " ", text)).strip())
+        return field["counter"] is None or field["counter"] >= kwork_length * 0.95
+
+    @classmethod
+    def _offer_error_text(cls, data: Any) -> str:
+        """Текст ошибки из ответа Kwork на создание отклика."""
+        if not isinstance(data, dict):
+            return ""
+        parts = [data[key] for key in ("response", "error", "message") if isinstance(data.get(key), str)]
+        errors = data.get("errors")
+        items = errors.values() if isinstance(errors, dict) else errors if isinstance(errors, list) else []
+        for item in items:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+            elif isinstance(item, list) and item:
+                parts.append(str(item[0]))
+            elif item:
+                parts.append(str(item))
+        return " ".join(cls._plain_text(" ".join(parts)).split())[:400]
+
+    async def _visible_popup_texts(self, page: Page) -> List[str]:
+        """Тексты видимых всплывающих окон Kwork."""
+        try:
+            return await page.evaluate(VISIBLE_POPUPS_JS)
+        except Exception:
+            return []
+
+    async def _new_popup_text(self, page: Page, before: List[str]) -> str:
+        """Текст всплывающего окна, которого не было до действия."""
+        for text in await self._visible_popup_texts(page):
+            if text not in before:
+                return text
+        return ""
+
+    async def _offer_screenshot(self, page: Optional[Page], filename: str) -> Optional[Path]:
+        """Скриншот блока формы отклика целиком (если он на странице), иначе видимой части страницы."""
+        if page is None or page.is_closed():
+            return None
+        path = config.SCREENSHOTS_DIR / filename
+        try:
+            form = page.locator(".modal-individual-offer").filter(has=page.locator(".trumbowyg-box")).first
+            if await form.is_visible():
+                await form.screenshot(path=str(path))
+            else:
+                await page.screenshot(path=str(path))
+            return path
+        except Exception as e:
+            logger.warning(f"Не удалось сделать скриншот {filename}: {e}")
+            return None
+
+    @staticmethod
+    async def _wait_visible(locator, timeout: int) -> bool:
+        try:
+            await locator.wait_for(state="visible", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            return False

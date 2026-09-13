@@ -142,7 +142,8 @@ async def run_parser_loop(bot: KworkBot):
                     proposal_title=analysis.proposal_title,
                     proposal_text=analysis.proposal_text,
                     duration_days=analysis.duration_days,
-                    status="WAITING_APPROVAL"
+                    status="WAITING_APPROVAL",
+                    form_price=form_price
                 )
 
                 # Отправка карточки согласования с инлайн-кнопками в Telegram
@@ -213,7 +214,8 @@ async def main():
             order_id=order_id,
             proposal_title=order_data.get("proposal_title") or f"Заказ #{order_id}",
             proposal_text=order_data.get("proposal_text") or "",
-            price=order_data.get("desired_price") or 1000,
+            # Цена по правилам бота (kwork_form_price); для заказов, сохранённых до её появления в БД, — как раньше
+            price=order_data.get("form_price") or order_data.get("desired_price") or 1000,
             duration_days=order_data.get("duration_days") or 3
         )
 

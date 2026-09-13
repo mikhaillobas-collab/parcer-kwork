@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 from pathlib import Path
 from typing import Optional, Callable, Any
@@ -98,7 +99,7 @@ def register_handlers(dispatcher: Dispatcher) -> None:
                     await status_msg.delete()
                 else:
                     update_order_status(order_id, "FAILED_SUBMIT", error_msg=err_msg)
-                    err_caption = f"❌ <b>Ошибка отправки заказа #{order_id}:</b>\n<code>{err_msg[:400]}</code>"
+                    err_caption = f"❌ <b>Ошибка отправки заказа #{order_id}:</b>\n<code>{html.escape(err_msg[:400])}</code>"
                     if screenshot_path and Path(screenshot_path).exists():
                         photo = FSInputFile(str(screenshot_path))
                         await callback.message.reply_photo(photo=photo, caption=err_caption)
@@ -107,7 +108,7 @@ def register_handlers(dispatcher: Dispatcher) -> None:
                         await status_msg.edit_text(err_caption)
             except Exception as e:
                 logger.error(f"Ошибка при исполнении callback approve для #{order_id}: {e}")
-                await status_msg.edit_text(f"❌ Ошибка выполнения: {e}")
+                await status_msg.edit_text(f"❌ Ошибка выполнения: {html.escape(str(e))}")
         else:
             await status_msg.edit_text("⚠️ Обработчик браузера не готов. Попробуйте позже.")
 

@@ -31,6 +31,10 @@ def init_db() -> None:
                 updated_at TEXT
             )
         """)
+        # Цена для формы Kwork по правилам бота (kwork_form_price) — добавляется в уже существующие БД
+        columns = {row["name"] for row in cursor.execute("PRAGMA table_info(orders)")}
+        if "form_price" not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN form_price INTEGER")
         conn.commit()
 
 def is_order_processed(kwork_id: str) -> bool:
@@ -53,7 +57,8 @@ def save_order(
     proposal_text: str = "",
     duration_days: int = 2,
     status: str = "PROCESSED",
-    error_msg: str = ""
+    error_msg: str = "",
+    form_price: Optional[int] = None
 ) -> None:
     """Сохраняет или обновляет информацию о заказе в БД."""
     now = datetime.now().isoformat()
@@ -63,8 +68,8 @@ def save_order(
             INSERT INTO orders (
                 kwork_id, title, description, budget_info, desired_price,
                 is_feasible, reasoning, tech_stack, proposal_title, proposal_text,
-                duration_days, status, error_msg, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                duration_days, status, error_msg, created_at, updated_at, form_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(kwork_id) DO UPDATE SET
                 title = excluded.title,
                 description = excluded.description,
@@ -78,11 +83,12 @@ def save_order(
                 duration_days = excluded.duration_days,
                 status = excluded.status,
                 error_msg = excluded.error_msg,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                form_price = excluded.form_price
         """, (
             str(kwork_id), title, description, budget_info, desired_price,
             1 if is_feasible else 0, reasoning, tech_stack, proposal_title, proposal_text,
-            duration_days, status, error_msg, now, now
+            duration_days, status, error_msg, now, now, form_price
         ))
         conn.commit()
 
