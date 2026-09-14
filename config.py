@@ -41,6 +41,8 @@ else:
     DEFAULT_DB_PATH = BASE_DIR / "kwork_bot.db"
 
 DB_PATH = Path(os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
+# PostgreSQL (строка подключения, например база на Bothost). Если задана — заказы хранятся в ней, иначе в SQLite (DB_PATH)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # Настройки ценообразования и фильтров
 MIN_ACCEPTABLE_PRICE = int(os.getenv("MIN_ACCEPTABLE_PRICE", "3000"))

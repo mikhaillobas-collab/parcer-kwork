@@ -13,7 +13,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 import config
-from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id
+from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id, describe_database
 from gemini_analyzer import analyze_kwork_order, parse_budget_details, screen_kwork_order
 from kwork_parser import KworkBot
 from tg_bot import (
@@ -234,8 +234,13 @@ async def main():
     print("=" * 65)
 
     # Инициализация БД
-    init_db()
-    stats = get_stats()
+    print(f"🔹 База данных: {describe_database()}")
+    try:
+        init_db()
+        stats = get_stats()
+    except Exception as e:
+        print(f"\n❌ ОШИБКА: не удалось открыть базу данных ({describe_database()}): {e}")
+        sys.exit(1)
     print(f"📊 Текущая статистика базы данных: {stats}\n")
 
     # Авто-установка Chromium Playwright для облака

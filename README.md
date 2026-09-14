@@ -67,6 +67,7 @@ python main.py
 | `LLM_SCREEN_MODEL` | `deepseek-flash` | Дешёвая модель предварительного отбора заказов (пусто — отбор отключён) |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | Адрес OpenAI-совместимого API |
 | `LLM_PROXY` | `""` | Прокси для запросов к нейросети (необязательно) |
+| `DATABASE_URL` | `""` | Строка подключения PostgreSQL; пусто — SQLite. Заказы из SQLite переносятся при первом запуске |
 | `KWORK_URL` | `https://kwork.ru/projects` | URL биржи с вашими фильтрами |
 | `DRY_RUN` | `true` | `true` — тестовый режим (скриншоты без отправки), `false` — боевой режим |
 | `HEADLESS` | `false` | `false` — окно браузера видно на экране, `true` — скрытый режим |
