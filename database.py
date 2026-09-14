@@ -104,6 +104,18 @@ def update_order_status(kwork_id: str, status: str, error_msg: str = "") -> None
         """, (status, error_msg, now, str(kwork_id)))
         conn.commit()
 
+def update_order_proposal(kwork_id: str, form_price: int, proposal_text: str) -> None:
+    """Сохраняет цену и текст отклика, изменённые из Telegram перед отправкой."""
+    now = datetime.now().isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE orders
+            SET form_price = ?, proposal_text = ?, updated_at = ?
+            WHERE kwork_id = ?
+        """, (form_price, proposal_text, now, str(kwork_id)))
+        conn.commit()
+
 def get_order_by_id(kwork_id: str) -> Optional[Dict[str, Any]]:
     """Возвращает информацию о заказе по его kwork_id."""
     with get_connection() as conn:

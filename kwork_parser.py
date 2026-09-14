@@ -256,10 +256,11 @@ class KworkBot:
                     else:
                         description = (await card.inner_text()).strip()
 
+                # Бюджет: "Желаемый бюджет: до X ₽ Допустимый: до Y ₽" или "Цена до: X ₽" — отдельный блок справа в карточке
                 budget_info = ""
-                budget_elem = card.locator(".want-card__budget, .project-card__price, .w-budget, div:has-text('Желаемый бюджет')").first
-                if await budget_elem.is_visible():
-                    budget_info = (await budget_elem.inner_text()).strip()
+                budget_elem = card.locator(".wants-card__right, .want-card__right, .want-card__budget, .project-card__price, .w-budget").first
+                if await budget_elem.count() > 0 and await budget_elem.is_visible():
+                    budget_info = " ".join((await budget_elem.inner_text()).split())
 
                 card_full_text = await card.inner_text()
                 offers_count = 0
@@ -363,23 +364,25 @@ class KworkBot:
         if not await self._wait_visible(self._editor_locator(page, "description"), 20000):
             shot = await self._offer_screenshot(page, f"err_{order_id}.png")
             return False, shot, "Форма отклика не загрузилась: нет поля 'Описание'"
+
+        # Цена должна входить в диапазон Kwork (подсказка поля «Стоимость»: "500 - 1 000"). Молча подгонять её нельзя:
+        # сумма в тексте отклика разойдётся с формой — пусть пользователь сам изменит цену в Telegram
+        price = int(price or 0)
+        price_input = page.locator("#offer-custom-price").first
+        price_visible = await price_input.is_visible()
+        if price_visible:
+            min_price, max_price = self._parse_price_range(await price_input.get_attribute("placeholder") or "")
+            if (min_price and price < min_price) or (max_price and price > max_price):
+                shot = await self._offer_screenshot(page, f"err_{order_id}.png")
+                return False, shot, (
+                    f"Цена {price} ₽ вне допустимого диапазона Kwork для этого заказа: от {min_price} до {max_price} ₽. "
+                    f"Нажмите «Изменить цену» и отправьте снова"
+                )
         await self._type_into_editor(page, "description", proposal_text)
 
-        # 3. Стоимость: цена по правилам бота в пределах диапазона формы (подсказка поля "500 - 1 000")
-        price_input = page.locator("#offer-custom-price").first
-        if await price_input.is_visible():
-            min_price, max_price = self._parse_price_range(await price_input.get_attribute("placeholder") or "")
-            target_price = int(price or 0)
-            if max_price and target_price > max_price:
-                target_price = max_price
-            if min_price and target_price < min_price:
-                target_price = min_price
-            if target_price != price:
-                logger.info(
-                    f"Цена {price} ₽ вне диапазона формы Kwork ({min_price} - {max_price} ₽), "
-                    f"в форму вводится {target_price} ₽"
-                )
-            await price_input.fill(str(target_price))
+        # 3. Стоимость: цена по правилам бота или заданная вручную в Telegram
+        if price_visible:
+            await price_input.fill(str(price))
             await price_input.evaluate("el => el.blur()")
 
         # 4. Порядок оплаты (появляется при цене от ~4 000 ₽): "Целиком, когда заказ выполнен".

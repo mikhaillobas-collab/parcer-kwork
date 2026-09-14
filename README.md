@@ -64,6 +64,7 @@ python main.py
 | `LLM_API_KEY` | `""` | Ключ API нейросети |
 | `LLM_MODEL` | `deepseek-v4-pro` | Основная модель |
 | `LLM_FALLBACK_MODELS` | `deepseek-flash` | Запасные модели через запятую |
+| `LLM_SCREEN_MODEL` | `deepseek-flash` | Дешёвая модель предварительного отбора заказов (пусто — отбор отключён) |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | Адрес OpenAI-совместимого API |
 | `LLM_PROXY` | `""` | Прокси для запросов к нейросети (необязательно) |
 | `KWORK_URL` | `https://kwork.ru/projects` | URL биржи с вашими фильтрами |

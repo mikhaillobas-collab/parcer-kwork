@@ -12,6 +12,8 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-pro").strip()
 # Запасные модели через запятую — используются, если основная вернула ошибку
 LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "deepseek-flash").split(",") if m.strip()]
+# Дешёвая модель для предварительного отбора заказов (пусто — отбор отключён, всё анализирует LLM_MODEL)
+LLM_SCREEN_MODEL = os.getenv("LLM_SCREEN_MODEL", "deepseek-flash").strip()
 
 # URL страницы биржи с настроенными фильтрами
 # Пользователь может скопировать полный URL из адресной строки браузера со своими фильтрами

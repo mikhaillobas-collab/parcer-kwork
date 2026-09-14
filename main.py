@@ -14,7 +14,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import config
 from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id
-from gemini_analyzer import analyze_kwork_order, parse_budget_details
+from gemini_analyzer import analyze_kwork_order, parse_budget_details, screen_kwork_order
 from kwork_parser import KworkBot
 from tg_bot import (
     start_telegram_polling,
@@ -128,8 +128,30 @@ async def run_parser_loop(bot: KworkBot):
                     )
                     continue
 
-                # 4. Анализ нейросетью
+                # 4. Предварительный отбор дешёвой моделью: явно чужие заказы не доходят до умной
                 logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (откликов: {offers_count})")
+                if config.LLM_SCREEN_MODEL:
+                    try:
+                        screening = await asyncio.to_thread(screen_kwork_order, title, description, budget_info)
+                    except Exception as e:
+                        logger.warning(f"Предварительный отбор #{order_id} не удался ({e}) — заказ уйдёт на полный анализ")
+                        screening = None
+                    if screening and not screening.is_feasible:
+                        logger.info(f"❌ Заказ #{order_id} отсеян на предварительном отборе: {screening.reasoning}")
+                        save_order(
+                            kwork_id=order_id,
+                            title=title,
+                            description=description,
+                            budget_info=budget_info,
+                            desired_price=desired,
+                            is_feasible=False,
+                            reasoning=f"Предварительный отбор ({config.LLM_SCREEN_MODEL}): {screening.reasoning}",
+                            status="REJECTED_BY_SCREENING"
+                        )
+                        await asyncio.sleep(2.0)
+                        continue
+
+                # 5. Полный анализ и текст отклика умной моделью
                 try:
                     analysis = await asyncio.to_thread(analyze_kwork_order, title, description, budget_info)
                 except Exception as e:
@@ -152,7 +174,7 @@ async def run_parser_loop(bot: KworkBot):
                     await asyncio.sleep(2.0)
                     continue
 
-                # 5. Задача целесообразна: сохраняем в БД со статусом WAITING_APPROVAL
+                # 6. Задача целесообразна: сохраняем в БД со статусом WAITING_APPROVAL
                 logger.info(f"✅ Заказ #{order_id} подходит! Подготовлен отклик. Отправляем в Telegram на согласование...")
                 form_price = getattr(analysis, "kwork_form_price", None) or getattr(analysis, "final_offer_price", 1000)
                 real_price = getattr(analysis, "real_suggested_price", None) or getattr(analysis, "final_offer_price", 1000)
@@ -204,6 +226,7 @@ async def main():
         sys.exit(1)
 
     print(f"🔹 Нейросеть: {config.LLM_MODEL} (запасные: {', '.join(config.LLM_FALLBACK_MODELS) or 'нет'}) — {config.LLM_BASE_URL}")
+    print(f"🔹 Предварительный отбор заказов: {config.LLM_SCREEN_MODEL or 'отключён'}")
     print(f"🔹 URL биржи: {config.KWORK_URL}")
     print(f"🔹 Режим DRY_RUN: {'ВКЛЮЧЕН (тест)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (боевой)'}")
     print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (экран)'}")
