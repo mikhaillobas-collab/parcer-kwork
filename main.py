@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import random
 import re
@@ -27,6 +28,31 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger("kwork_bot")
+
+MODEL_ALERT_INTERVAL = 3600  # не чаще раза в час
+_last_model_alert: float | None = None
+
+async def notify_model_error(error: Exception) -> None:
+    """Сообщает в Telegram, что нейросеть не отвечает (закончился баланс, отключён ключ и т.п.)."""
+    global _last_model_alert
+    now = time.monotonic()
+    if _last_model_alert is not None and now - _last_model_alert < MODEL_ALERT_INTERVAL:
+        return
+    t_bot = get_bot()
+    if not t_bot or not config.TELEGRAM_CHAT_ID:
+        return
+    try:
+        await t_bot.send_message(
+            chat_id=config.TELEGRAM_CHAT_ID,
+            text=(
+                f"⚠️ <b>Нейросеть ({html.escape(config.LLM_MODEL)}) не отвечает — заказы не анализируются.</b>\n"
+                f"<code>{html.escape(str(error)[:500])}</code>\n\n"
+                f"Следующее такое уведомление — не раньше чем через час."
+            )
+        )
+        _last_model_alert = now
+    except Exception as e:
+        logger.warning(f"Не удалось отправить в Telegram уведомление об ошибке нейросети: {e}")
 
 async def run_parser_loop(bot: KworkBot):
     """Фоновый цикл периодического скрапинга и анализа биржи Kwork."""
@@ -102,12 +128,13 @@ async def run_parser_loop(bot: KworkBot):
                     )
                     continue
 
-                # 4. Анализ через Gemini
+                # 4. Анализ нейросетью
                 logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (откликов: {offers_count})")
                 try:
                     analysis = await asyncio.to_thread(analyze_kwork_order, title, description, budget_info)
                 except Exception as e:
-                    logger.error(f"Не удалось проанализировать заказ #{order_id} через Gemini: {e}")
+                    logger.error(f"Не удалось проанализировать заказ #{order_id} через нейросеть: {e}")
+                    await notify_model_error(e)
                     continue
 
                 if not analysis.is_feasible:
@@ -172,11 +199,11 @@ async def main():
     print("🤖 KWORK AUTOMATION BOT (HUMAN-IN-THE-LOOP + AIOGRAM 3)")
     print("=" * 65)
 
-    if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_gemini_api_key_here":
-        print("\n❌ ОШИБКА: Не задан GEMINI_API_KEY в .env!")
+    if not config.LLM_API_KEY:
+        print("\n❌ ОШИБКА: Не задан LLM_API_KEY (ключ API нейросети) в переменных окружения!")
         sys.exit(1)
 
-    print(f"🔹 Модель Gemini: {config.GEMINI_MODEL}")
+    print(f"🔹 Нейросеть: {config.LLM_MODEL} (запасные: {', '.join(config.LLM_FALLBACK_MODELS) or 'нет'}) — {config.LLM_BASE_URL}")
     print(f"🔹 URL биржи: {config.KWORK_URL}")
     print(f"🔹 Режим DRY_RUN: {'ВКЛЮЧЕН (тест)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (боевой)'}")
     print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (экран)'}")

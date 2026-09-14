@@ -11,10 +11,10 @@ def is_telegram_configured() -> bool:
     return bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
 def get_opener():
-    if config.GEMINI_PROXY:
+    if config.LLM_PROXY:
         proxy_handler = urllib.request.ProxyHandler({
-            "http": config.GEMINI_PROXY,
-            "https": config.GEMINI_PROXY
+            "http": config.LLM_PROXY,
+            "https": config.LLM_PROXY
         })
         return urllib.request.build_opener(proxy_handler)
     return urllib.request.build_opener()

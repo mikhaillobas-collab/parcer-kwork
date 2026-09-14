@@ -6,9 +6,12 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-# Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+# Нейросеть для анализа заказов: любой OpenAI-совместимый API (по умолчанию DeepSeek)
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-pro").strip()
+# Запасные модели через запятую — используются, если основная вернула ошибку
+LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "deepseek-flash").split(",") if m.strip()]
 
 # URL страницы биржи с настроенными фильтрами
 # Пользователь может скопировать полный URL из адресной строки браузера со своими фильтрами
@@ -79,11 +82,9 @@ def normalize_proxy(raw: str) -> str:
         return "http://" + raw
     return raw
 
-# Прокси для обхода геоблокировки Google Gemini (User location is not supported)
+# Прокси для запросов к нейросети (необязательно)
 # Поддерживает любые форматы: http://user:pass@ip:port или ip:port:user:pass
-_raw_proxy = os.getenv("GEMINI_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
-GEMINI_PROXY = normalize_proxy(_raw_proxy)
-GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip()
+LLM_PROXY = normalize_proxy(os.getenv("LLM_PROXY", "").strip())
 
 
 

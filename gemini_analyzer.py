@@ -1,14 +1,13 @@
 import json
 import logging
 import re
-import time
 from pathlib import Path
 from typing import Optional, Tuple
 
+import httpx
+from openai import OpenAI, APIStatusError
 from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
-from config import GEMINI_API_KEY, GEMINI_MODEL, MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH, GEMINI_PROXY, GEMINI_BASE_URL
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_FALLBACK_MODELS, LLM_PROXY, MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -193,30 +192,46 @@ def apply_cases_phrase_rule(text: str, client_requested_cases: bool) -> str:
             lines.append(" ".join(kept))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
+def _schema_for_prompt(node, in_properties: bool = False):
+    """JSON-схема ответа без значений по умолчанию и служебных заголовков, чтобы не подсказывать модели цифры."""
+    if isinstance(node, dict):
+        return {
+            key: _schema_for_prompt(value, key == "properties")
+            for key, value in node.items()
+            if in_properties or key not in ("default", "title")
+        }
+    if isinstance(node, list):
+        return [_schema_for_prompt(value) for value in node]
+    return node
+
+# Схема передаётся в промпте: DeepSeek поддерживает режим JSON, но не проверку ответа по схеме
+ANALYSIS_JSON_SCHEMA = json.dumps(_schema_for_prompt(ProposalAnalysis.model_json_schema()), ensure_ascii=False)
+
+_client: Optional[OpenAI] = None
+
+def get_llm_client() -> OpenAI:
+    """Клиент OpenAI-совместимого API нейросети (по умолчанию DeepSeek)."""
+    global _client
+    if _client is None:
+        # Прокси только явный (LLM_PROXY): старые GEMINI_PROXY / HTTPS_PROXY из окружения не подхватываются
+        http_client = httpx.Client(proxy=LLM_PROXY or None, trust_env=False, timeout=httpx.Timeout(300.0, connect=20.0))
+        _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, http_client=http_client)
+    return _client
+
 def analyze_kwork_order(
     title: str,
     description: str,
     budget_info: str = ""
 ) -> ProposalAnalysis:
     """
-    Анализирует заказ Kwork с помощью Google Gemini с комбинированным контролем цен:
+    Анализирует заказ Kwork с помощью нейросети (OpenAI-совместимый API, по умолчанию DeepSeek)
+    с комбинированным контролем цен:
     - Проверяет техническую осуществимость.
     - Различает доработку существующего проекта и разработку с нуля.
     - Оценивает адекватность цены по тарифной сетке и допустимому диапазону Kwork.
     - Формирует аргументированный профессиональный отклик (от 160 до 1900 символов).
     """
-    http_options = None
-    client_args = {}
-    if GEMINI_PROXY:
-        client_args["proxy"] = GEMINI_PROXY
-
-    if client_args or GEMINI_BASE_URL:
-        http_options = types.HttpOptions(
-            base_url=GEMINI_BASE_URL or None,
-            client_args=client_args or None
-        )
-
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_options)
+    client = get_llm_client()
     pricing_rules = load_pricing_rules()
 
     extracted_desired, extracted_max = parse_budget_details(budget_info)
@@ -262,7 +277,10 @@ def analyze_kwork_order(
         "   - Обоснование цены (с учетом вилки платформы и реального предложения).\n"
         "   - Длина: СТРОГО от 160 до 1900 символов (требование Kwork: не менее 150 символов!).\n"
         "7. Название заказа (proposal_title): кратко и емко (СТРОГО до 70 символов).\n"
-        "8. Срок выполнения (duration_days): строго 2 или 3 дня."
+        "8. Срок выполнения (duration_days): строго 2 или 3 дня.\n\n"
+        "ФОРМАТ ОТВЕТА: верни ровно один JSON-объект со всеми полями из JSON-схемы ниже, без markdown и пояснений. "
+        "Описания полей в схеме — такие же обязательные правила, как и правила выше.\n"
+        f"JSON-схема: {ANALYSIS_JSON_SCHEMA}"
     )
 
     user_prompt = f"""
@@ -276,37 +294,29 @@ def analyze_kwork_order(
 {description}
 """
 
-    gen_config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=ProposalAnalysis,
-        system_instruction=system_prompt,
-        temperature=0.3,
-    )
-
-    models_to_try = [GEMINI_MODEL]
-    fallback_models = [
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-flash-lite-latest",
-        "gemini-flash-latest"
-    ]
-    for m in fallback_models:
-        if m not in models_to_try:
-            models_to_try.append(m)
+    models_to_try = list(dict.fromkeys([LLM_MODEL, *LLM_FALLBACK_MODELS]))
 
     last_error = None
     for model_name in models_to_try:
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                logger.info(f"Запрос к Gemini (модель: {model_name}, попытка {attempt + 1})...")
-                response = client.models.generate_content(
+                logger.info(f"Запрос к нейросети (модель: {model_name}, попытка {attempt + 1})...")
+                response = client.chat.completions.create(
                     model=model_name,
-                    contents=user_prompt,
-                    config=gen_config
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.3,
+                    max_tokens=16000
                 )
-                data = json.loads(response.text)
+                choice = response.choices[0]
+                content = (choice.message.content or "").strip()
+                if not content:
+                    raise ValueError(f"пустой ответ модели (finish_reason={choice.finish_reason})")
+                data = json.loads(content)
                 result = ProposalAnalysis(**data)
 
                 # Синхронизируем извлеченные регуляркой бюджеты
@@ -353,7 +363,7 @@ def analyze_kwork_order(
                 result.proposal_text = apply_cases_phrase_rule(proposal_before, result.client_requested_cases)
                 if result.proposal_text != proposal_before:
                     logger.info(
-                        "Фраза про кейсы добавлена: заказчик просит кейсы, а Gemini её пропустил"
+                        "Фраза про кейсы добавлена: заказчик просит кейсы, а модель её пропустила"
                         if result.client_requested_cases else
                         "Фраза про кейсы удалена: заказчик не просит кейсы"
                     )
@@ -365,26 +375,26 @@ def analyze_kwork_order(
                         f"Стек: {result.tech_stack}. Гарантирую качественный результат и поддержку!"
                     )
 
+                logger.info(f"Анализ выполнен моделью {model_name}")
                 return result
 
+            except APIStatusError as e:
+                last_error = e
+                if e.status_code in (401, 402, 403):
+                    # Неверный ключ, закончился баланс или нет доступа — другие модели этого API не помогут
+                    logger.error(f"Нейросеть отклонила запрос ({e.status_code}): {e}")
+                    raise
+                logger.warning(f"Модель {model_name} вернула ошибку: {e}.")
+                break  # Временные ошибки (429/5xx) SDK уже повторил сам — переходим к следующей модели
+            except ValueError as e:
+                # Пустой ответ, битый JSON или ответ не по схеме — повторяем запрос
+                last_error = e
+                logger.warning(f"Модель {model_name} вернула некорректный ответ: {e}")
             except Exception as e:
                 last_error = e
-                err_str = str(e)
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    # Извлекаем рекомендуемое Google время ожидания, если указано
-                    wait_sec = 8.0
-                    retry_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
-                    if retry_match:
-                        wait_sec = float(retry_match.group(1)) + 2.0
-                    logger.warning(
-                        f"Лимит запросов Google API (429 RESOURCE_EXHAUSTED). "
-                        f"Ожидание {wait_sec:.1f} сек. перед повторной попыткой..."
-                    )
-                    time.sleep(wait_sec)
-                else:
-                    logger.warning(f"Модель {model_name} вернула ошибку: {e}.")
-                    break  # При других ошибках (например 404/400) сразу переходим к следующей модели
+                logger.warning(f"Модель {model_name} недоступна: {e}.")
+                break  # Сеть или таймаут — переходим к следующей модели
 
-    logger.error(f"Все доступные модели Gemini вернули ошибку. Последняя: {last_error}")
+    logger.error(f"Все модели нейросети вернули ошибку. Последняя: {last_error}")
     raise last_error
 

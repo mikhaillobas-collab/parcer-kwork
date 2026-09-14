@@ -35,7 +35,7 @@
    nano server/.env.docker
    ```
    Вставьте:
-   - `GEMINI_API_KEY` (ваш ключ Gemini)
+   - `LLM_API_KEY` (ключ API нейросети, по умолчанию DeepSeek)
    - `TELEGRAM_BOT_TOKEN` (токен вашего бота)
    - `TELEGRAM_CHAT_ID` (ваш числовой ID)
    - Установите `DRY_RUN=true` для проверки или `DRY_RUN=false` для реальной работы.

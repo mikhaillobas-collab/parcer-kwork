@@ -1,4 +1,4 @@
-# 🤖 Kwork Auto-Bidder & Gemini Analyzer
+# 🤖 Kwork Auto-Bidder & AI Analyzer
 
 Автоматический мониторинг биржи Kwork, фильтрация заказов, интеллектуальный анализ осуществимости силами AI/разработчика и автоотклик через форму предложения услуг.
 
@@ -10,7 +10,7 @@
    - Не вызывает блокировок Cloudflare, так как использует постоянную директорию профиля (`browser_profile/`).
    - Вход в аккаунт требуется выполнить **только один раз** при первом запуске.
 
-2. **Интеллектуальный анализ через Gemini:**
+2. **Интеллектуальный анализ нейросетью (DeepSeek или любой OpenAI-совместимый API):**
    - Оценивает техническую осуществимость задачи (парсинг, боты, скрипты, бэкенд, таблицы, автоматизация).
    - Отсекает невыполнимые офлайн-задачи (курьеры, звонки, физический труд).
    - Автоматически формирует профессиональный стек технологий (Python, Playwright, Aiogram, BeautifulSoup и др.).
@@ -34,11 +34,11 @@
    ```powershell
    copy .env.example .env
    ```
-2. Откройте `.env` и укажите ваш API-ключ Gemini:
+2. Откройте `.env` и укажите ключ API нейросети:
    ```env
-   GEMINI_API_KEY=AIzaSy...
+   LLM_API_KEY=sk-...
    ```
-   *(Бесплатный ключ можно получить в [Google AI Studio](https://aistudio.google.com/))*
+   *(Ключ DeepSeek создаётся в [DeepSeek Platform](https://platform.deepseek.com/api_keys))*
 
 3. Скопируйте из адресной строки браузера ссылку на биржу Kwork с вашими настроенными фильтрами:
    ```env
@@ -61,8 +61,11 @@ python main.py
 
 | Параметр | По умолчанию | Описание |
 |---|---|---|
-| `GEMINI_API_KEY` | `""` | API-ключ Google Gemini |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Модель Gemini (`gemini-2.5-flash`, `gemini-2.5-pro` и т.д.) |
+| `LLM_API_KEY` | `""` | Ключ API нейросети |
+| `LLM_MODEL` | `deepseek-v4-pro` | Основная модель |
+| `LLM_FALLBACK_MODELS` | `deepseek-flash` | Запасные модели через запятую |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | Адрес OpenAI-совместимого API |
+| `LLM_PROXY` | `""` | Прокси для запросов к нейросети (необязательно) |
 | `KWORK_URL` | `https://kwork.ru/projects` | URL биржи с вашими фильтрами |
 | `DRY_RUN` | `true` | `true` — тестовый режим (скриншоты без отправки), `false` — боевой режим |
 | `HEADLESS` | `false` | `false` — окно браузера видно на экране, `true` — скрытый режим |
