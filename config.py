@@ -15,9 +15,9 @@ LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "deep
 # Дешёвая модель для предварительного отбора заказов (пусто — отбор отключён, всё анализирует LLM_MODEL)
 LLM_SCREEN_MODEL = os.getenv("LLM_SCREEN_MODEL", "deepseek-flash").strip()
 
-# URL страницы биржи с настроенными фильтрами
-# Пользователь может скопировать полный URL из адресной строки браузера со своими фильтрами
-KWORK_URL = os.getenv("KWORK_URL", "https://kwork.ru/projects")
+# Биржа во вкладке «Любимые»: только рубрики, отмеченные звёздочкой в аккаунте Kwork.
+# Список рубрик меняется на самом Kwork, переменной окружения для него нет
+KWORK_FAVOURITES_URL = "https://kwork.ru/projects?a=1"
 
 # Режим работы
 # ВНИМАНИЕ: Если DRY_RUN = True, бот формирует отклик, заполняет форму (или делает скриншот),

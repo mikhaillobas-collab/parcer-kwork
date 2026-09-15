@@ -65,6 +65,25 @@ VISIBLE_POPUPS_JS = r"""() => [...document.querySelectorAll(".modal, .kw-modal, 
     .map(el => el.innerText.replace(/\s+/g, ' ').trim().slice(0, 300))
     .filter(Boolean)"""
 
+# Данные, которые Kwork встраивает в страницу биржи (window.stateData):
+# favourites — любимые рубрики аккаунта {id рубрики: название}, wantRubrics — рубрики заказов на странице {id заказа: id рубрики}
+EXCHANGE_RUBRICS_JS = r"""() => {
+    const st = window.stateData || {};
+    const fav = st.favouriteCategories;
+    const favourites = {};
+    for (const c of Array.isArray(fav) ? fav : Object.values(fav || {})) {
+        if (c && c.category_id) favourites[String(c.category_id)] = String(c.name || c.category_id);
+    }
+    const wantRubrics = {};
+    for (const w of ((st.pagination || {}).data || [])) {
+        if (w && w.id) wantRubrics[String(w.id)] = String(w.category_id);
+    }
+    return {favourites, wantRubrics};
+}"""
+
+class FavouriteRubricsNotFound(Exception):
+    """На бирже не видно любимых рубрик: слетел вход в Kwork или в аккаунте не отмечено ни одной любимой рубрики."""
+
 class KworkBot:
     def __init__(self):
         self.playwright = None
@@ -72,6 +91,8 @@ class KworkBot:
         self.page: Optional[Page] = None
         # Заказы, по которым сейчас идёт отправка отклика (защита от двойного нажатия в Telegram)
         self._submitting: set = set()
+        # Любимые рубрики с прошлой проверки биржи — чтобы писать список в лог только при изменении
+        self._favourites: Dict[str, str] = {}
 
     async def start_browser(self) -> None:
         """Запускает браузер с постоянным профилем сессии через асинхронный Playwright."""
@@ -206,12 +227,25 @@ class KworkBot:
         return False
 
     async def fetch_orders_from_exchange(self) -> List[Dict[str, Any]]:
-        """Загружает страницу биржи и собирает новые карточки."""
+        """Загружает биржу во вкладке «Любимые» и собирает новые карточки из любимых рубрик."""
         await self.ensure_browser_alive()
-        url = config.KWORK_URL
+        url = config.KWORK_FAVOURITES_URL
         logger.info(f"Переход на биржу: {url}")
         await self.page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(4)
+
+        # Без входа в Kwork вкладка «Любимые» показывает все рубрики подряд — поэтому сверяем рубрику каждой карточки
+        rubrics = await self.page.evaluate(EXCHANGE_RUBRICS_JS)
+        favourites: Dict[str, str] = rubrics["favourites"]
+        want_rubrics: Dict[str, str] = rubrics["wantRubrics"]
+        if not favourites:
+            self._favourites = {}
+            raise FavouriteRubricsNotFound(
+                "На бирже не видно любимых рубрик: слетел вход в Kwork или в аккаунте не отмечено ни одной любимой рубрики"
+            )
+        if favourites != self._favourites:
+            logger.info(f"⭐ Любимые рубрики на Kwork: {', '.join(favourites.values())}")
+            self._favourites = favourites
 
         cards = await self.page.locator(".want-card, div.project-card, div[data-id]").all()
         if not cards:
@@ -219,6 +253,7 @@ class KworkBot:
 
         logger.info(f"Найдено карточек на странице: {len(cards)}")
         extracted_orders = []
+        other_rubric_ids = set()
 
         for idx, card in enumerate(cards):
             try:
@@ -231,6 +266,11 @@ class KworkBot:
                 if not match_id:
                     continue
                 order_id = match_id.group(1)
+
+                rubric = favourites.get(want_rubrics.get(order_id, ""))
+                if not rubric:
+                    other_rubric_ids.add(order_id)
+                    continue
 
                 if is_order_processed(order_id):
                     continue
@@ -275,13 +315,16 @@ class KworkBot:
                     "title": title,
                     "description": description,
                     "budget_info": budget_info,
-                    "offers_count": offers_count
+                    "offers_count": offers_count,
+                    "rubric": rubric
                 })
 
             except Exception as e:
                 logger.debug(f"Ошибка при парсинге карточки #{idx}: {e}")
                 continue
 
+        if other_rubric_ids:
+            logger.warning(f"Пропущено карточек не из любимых рубрик: {len(other_rubric_ids)}")
         return extracted_orders
 
     async def submit_proposal_by_id(

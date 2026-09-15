@@ -15,7 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
 import config
 from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id, describe_database
 from gemini_analyzer import analyze_kwork_order, parse_budget_details, screen_kwork_order
-from kwork_parser import KworkBot
+from kwork_parser import KworkBot, FavouriteRubricsNotFound
 from tg_bot import (
     start_telegram_polling,
     send_order_card_for_approval,
@@ -29,14 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("kwork_bot")
 
-MODEL_ALERT_INTERVAL = 3600  # не чаще раза в час
-_last_model_alert: float | None = None
+ALERT_INTERVAL = 3600  # одно и то же предупреждение — не чаще раза в час
+_last_alerts: dict[str, float] = {}
 
-async def notify_model_error(error: Exception) -> None:
-    """Сообщает в Telegram, что нейросеть не отвечает (закончился баланс, отключён ключ и т.п.)."""
-    global _last_model_alert
+async def send_alert(kind: str, text: str) -> None:
+    """Предупреждение владельцу в Telegram; предупреждения одного вида (kind) — не чаще раза в час."""
     now = time.monotonic()
-    if _last_model_alert is not None and now - _last_model_alert < MODEL_ALERT_INTERVAL:
+    last = _last_alerts.get(kind)
+    if last is not None and now - last < ALERT_INTERVAL:
         return
     t_bot = get_bot()
     if not t_bot or not config.TELEGRAM_CHAT_ID:
@@ -44,15 +44,28 @@ async def notify_model_error(error: Exception) -> None:
     try:
         await t_bot.send_message(
             chat_id=config.TELEGRAM_CHAT_ID,
-            text=(
-                f"⚠️ <b>Нейросеть ({html.escape(config.LLM_MODEL)}) не отвечает — заказы не анализируются.</b>\n"
-                f"<code>{html.escape(str(error)[:500])}</code>\n\n"
-                f"Следующее такое уведомление — не раньше чем через час."
-            )
+            text=f"{text}\n\nСледующее такое уведомление — не раньше чем через час."
         )
-        _last_model_alert = now
+        _last_alerts[kind] = now
     except Exception as e:
-        logger.warning(f"Не удалось отправить в Telegram уведомление об ошибке нейросети: {e}")
+        logger.warning(f"Не удалось отправить предупреждение в Telegram: {e}")
+
+async def notify_model_error(error: Exception) -> None:
+    """Сообщает в Telegram, что нейросеть не отвечает (закончился баланс, отключён ключ и т.п.)."""
+    await send_alert(
+        "model",
+        f"⚠️ <b>Нейросеть ({html.escape(config.LLM_MODEL)}) не отвечает — заказы не анализируются.</b>\n"
+        f"<code>{html.escape(str(error)[:500])}</code>"
+    )
+
+async def notify_favourites_missing() -> None:
+    """Сообщает в Telegram, что на бирже не видно любимых рубрик (слетел вход в Kwork или список пуст)."""
+    await send_alert(
+        "favourites",
+        "⚠️ <b>Не вижу любимых рубрик на бирже Kwork — заказы не обрабатываются.</b>\n"
+        "• Если слетел вход в Kwork: выгрузите куки заново скриптом export_cookies.py и обновите переменную KWORK_COOKIES на Bothost.\n"
+        "• Если в аккаунте нет ни одной любимой рубрики: отметьте рубрики звёздочкой на бирже Kwork."
+    )
 
 async def run_parser_loop(bot: KworkBot):
     """Фоновый цикл периодического скрапинга и анализа биржи Kwork."""
@@ -74,6 +87,7 @@ async def run_parser_loop(bot: KworkBot):
                 description = order["description"]
                 budget_info = order["budget_info"]
                 offers_count = order.get("offers_count", 0)
+                rubric = order.get("rubric", "")
 
                 # 1. Фильтр конкуренции
                 if offers_count > config.MAX_EXISTING_OFFERS:
@@ -129,10 +143,10 @@ async def run_parser_loop(bot: KworkBot):
                     continue
 
                 # 4. Предварительный отбор дешёвой моделью: явно чужие заказы не доходят до умной
-                logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (откликов: {offers_count})")
+                logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (рубрика: {rubric}, откликов: {offers_count})")
                 if config.LLM_SCREEN_MODEL:
                     try:
-                        screening = await asyncio.to_thread(screen_kwork_order, title, description, budget_info)
+                        screening = await asyncio.to_thread(screen_kwork_order, title, description, budget_info, rubric)
                     except Exception as e:
                         logger.warning(f"Предварительный отбор #{order_id} не удался ({e}) — заказ уйдёт на полный анализ")
                         screening = None
@@ -153,7 +167,7 @@ async def run_parser_loop(bot: KworkBot):
 
                 # 5. Полный анализ и текст отклика умной моделью
                 try:
-                    analysis = await asyncio.to_thread(analyze_kwork_order, title, description, budget_info)
+                    analysis = await asyncio.to_thread(analyze_kwork_order, title, description, budget_info, rubric)
                 except Exception as e:
                     logger.error(f"Не удалось проанализировать заказ #{order_id} через нейросеть: {e}")
                     await notify_model_error(e)
@@ -209,6 +223,9 @@ async def run_parser_loop(bot: KworkBot):
 
                 await asyncio.sleep(3.0)
 
+        except FavouriteRubricsNotFound as e:
+            logger.warning(f"⚠️ {e}. Заказы не обрабатываются до следующей проверки.")
+            await notify_favourites_missing()
         except Exception as e:
             logger.error(f"Ошибка во время итерации мониторинга: {e}", exc_info=True)
 
@@ -227,7 +244,7 @@ async def main():
 
     print(f"🔹 Нейросеть: {config.LLM_MODEL} (запасные: {', '.join(config.LLM_FALLBACK_MODELS) or 'нет'}) — {config.LLM_BASE_URL}")
     print(f"🔹 Предварительный отбор заказов: {config.LLM_SCREEN_MODEL or 'отключён'}")
-    print(f"🔹 URL биржи: {config.KWORK_URL}")
+    print(f"🔹 Биржа: любимые рубрики — {config.KWORK_FAVOURITES_URL}")
     print(f"🔹 Режим DRY_RUN: {'ВКЛЮЧЕН (тест)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (боевой)'}")
     print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (экран)'}")
     print(f"🔹 Telegram-уведомления: {'ВКЛЮЧЕНЫ' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'ВЫКЛЮЧЕНЫ'}")
