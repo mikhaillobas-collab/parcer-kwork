@@ -20,6 +20,7 @@ from gemini_analyzer import (
     describe_screen_models,
     parse_budget_details,
     screen_kwork_order,
+    screening_enabled,
     take_fallback_note
 )
 from kwork_parser import KworkBot, FavouriteRubricsNotFound
@@ -158,7 +159,7 @@ async def run_parser_loop(bot: KworkBot):
 
                 # 4. Предварительный отбор дешёвой моделью: явно чужие заказы не доходят до умной
                 logger.info(f"\n🔍 Анализ заказа #{order_id}: '{title}' (рубрика: {rubric}, откликов: {offers_count})")
-                if config.LLM_SCREEN_MODEL:
+                if screening_enabled():
                     try:
                         screening = await asyncio.to_thread(screen_kwork_order, title, description, budget_info, rubric)
                     except Exception as e:
@@ -174,7 +175,7 @@ async def run_parser_loop(bot: KworkBot):
                             budget_info=budget_info,
                             desired_price=desired,
                             is_feasible=False,
-                            reasoning=f"Предварительный отбор ({config.LLM_SCREEN_MODEL}): {screening.reasoning}",
+                            reasoning=f"Предварительный отбор: {screening.reasoning}",
                             status="REJECTED_BY_SCREENING"
                         )
                         await asyncio.sleep(2.0)

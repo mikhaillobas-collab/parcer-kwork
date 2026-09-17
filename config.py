@@ -11,7 +11,7 @@ load_dotenv(BASE_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
 # Запасные модели Gemini через запятую — используются, если основная вернула ошибку
-GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.7-flash").split(",") if m.strip()]
+GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.7-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
 # Дешёвая модель Gemini для предварительного отбора заказов
 GEMINI_SCREEN_MODEL = os.getenv("GEMINI_SCREEN_MODEL", "gemini-3.5-flash-lite").strip()
 # Адрес API Gemini (пусто — стандартный адрес Google)

@@ -310,12 +310,15 @@ def _error_code(error: Exception) -> Optional[int]:
     return None
 
 def _plan(screening: bool) -> List[Tuple[str, List[str]]]:
-    """Нейросети и их модели по порядку: сначала все модели Gemini, затем запасная. Недоступные сейчас пропускаются."""
-    plan: List[Tuple[str, List[str]]] = []
-    if GEMINI_API_KEY:
-        plan.append((GEMINI, [GEMINI_SCREEN_MODEL] if screening else [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]))
-    if LLM_API_KEY:
-        plan.append((FALLBACK_API, [LLM_SCREEN_MODEL] if screening else [LLM_MODEL, *LLM_FALLBACK_MODELS]))
+    """
+    Нейросети и их модели по порядку. Отклик пишет Gemini (запасная — если Gemini недоступен),
+    а предварительный отбор новых карточек делает дешёвая модель запасной нейросети, чтобы беречь лимиты Gemini.
+    Недоступные сейчас нейросети пропускаются.
+    """
+    gemini = (GEMINI, [GEMINI_SCREEN_MODEL] if screening else [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]) if GEMINI_API_KEY else None
+    fallback = (FALLBACK_API, [LLM_SCREEN_MODEL] if screening else [LLM_MODEL, *LLM_FALLBACK_MODELS]) if LLM_API_KEY else None
+    ordered = [fallback, gemini] if screening else [gemini, fallback]
+    plan: List[Tuple[str, List[str]]] = [item for item in ordered if item]
 
     now = time.monotonic()
     return [
@@ -339,9 +342,13 @@ def describe_models() -> str:
         parts.append(f"{'запасная — ' if GEMINI_API_KEY else ''}{LLM_BASE_URL}: {', '.join([LLM_MODEL, *LLM_FALLBACK_MODELS])}")
     return " | ".join(parts) or "не заданы ключи нейросетей"
 
+def screening_enabled() -> bool:
+    """Включён ли предварительный отбор новых карточек (задана хотя бы одна дешёвая модель с ключом)."""
+    return bool(LLM_API_KEY and LLM_SCREEN_MODEL) or bool(GEMINI_API_KEY and GEMINI_SCREEN_MODEL)
+
 def describe_screen_models() -> str:
-    """Какие модели отбирают заказы — для лога запуска."""
-    models = [GEMINI_SCREEN_MODEL if GEMINI_API_KEY else "", LLM_SCREEN_MODEL if LLM_API_KEY else ""]
+    """Какие модели отбирают заказы — для лога запуска (в порядке обращения)."""
+    models = [LLM_SCREEN_MODEL if LLM_API_KEY else "", GEMINI_SCREEN_MODEL if GEMINI_API_KEY else ""]
     return ", ".join(m for m in models if m) or "отключён"
 
 def request_json_from_llm(
@@ -372,7 +379,8 @@ def request_json_from_llm(
                     result = (_ask_gemini if provider == GEMINI else _ask_openai_compatible)(
                         model_name, system_prompt, user_prompt, response_model
                     )
-                    if provider != GEMINI and GEMINI_API_KEY:
+                    if not screening and provider != GEMINI and GEMINI_API_KEY:
+                        # Отклик пишет не Gemini — значит он недоступен (для предварительного отбора это нормально)
                         reason = f"Причина: {str(last_error)[:300]}" if last_error else "Gemini временно отключён после отказа."
                         _fallback_note = (
                             f"Gemini ({GEMINI_MODEL}) не отвечает — заказы анализирует запасная нейросеть ({model_name}). {reason}"
