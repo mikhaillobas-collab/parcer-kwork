@@ -2,13 +2,18 @@ import json
 import logging
 import math
 import re
+import time
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Type, TypeVar
+from typing import Dict, List, Optional, Tuple, Type, TypeVar
 
 import httpx
-from openai import OpenAI, APIStatusError
+from openai import OpenAI
 from pydantic import BaseModel, Field
-from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_FALLBACK_MODELS, LLM_SCREEN_MODEL, LLM_PROXY, MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH
+from config import (
+    GEMINI_API_KEY, GEMINI_BASE_URL, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_SCREEN_MODEL, GEMINI_PROXY,
+    LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_FALLBACK_MODELS, LLM_SCREEN_MODEL, LLM_PROXY,
+    MIN_ACCEPTABLE_PRICE, PRICING_RULES_PATH
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,71 +219,188 @@ def _schema_for_prompt(node, in_properties: bool = False):
         return [_schema_for_prompt(value) for value in node]
     return node
 
-# Схема передаётся в промпте: DeepSeek поддерживает режим JSON, но не проверку ответа по схеме
+# Схема передаётся в промпте: OpenAI-совместимые модели поддерживают режим JSON, но не проверку ответа по схеме
+# (Gemini проверяет ответ по схеме сам — response_schema)
 ANALYSIS_JSON_SCHEMA = json.dumps(_schema_for_prompt(ProposalAnalysis.model_json_schema()), ensure_ascii=False)
 
+GEMINI = "Gemini"
+FALLBACK_API = "запасная нейросеть"
+
+# Отказ по ключу, доступу или балансу: остальные модели этой нейросети не помогут — не обращаемся к ней час
+AUTH_CODES = (401, 402, 403)
+AUTH_COOLDOWN = 3600
+# Лимит запросов (429) считается по каждой модели отдельно, поэтому сначала пробуем остальные модели,
+# и только если лимит у всех — не обращаемся к этой нейросети 10 минут
+QUOTA_COOLDOWN = 600
+_blocked_until: Dict[str, float] = {}
+_fallback_note: Optional[str] = None
+
 _client: Optional[OpenAI] = None
+_gemini_client = None
 
 def get_llm_client() -> OpenAI:
-    """Клиент OpenAI-совместимого API нейросети (по умолчанию DeepSeek)."""
+    """Клиент OpenAI-совместимого API запасной нейросети (по умолчанию DeepSeek)."""
     global _client
     if _client is None:
-        # Прокси только явный (LLM_PROXY): старые GEMINI_PROXY / HTTPS_PROXY из окружения не подхватываются
+        # Прокси только явный (LLM_PROXY): HTTPS_PROXY из окружения не подхватывается
         http_client = httpx.Client(proxy=LLM_PROXY or None, trust_env=False, timeout=httpx.Timeout(300.0, connect=20.0))
         _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, http_client=http_client)
     return _client
 
+def get_gemini_client():
+    """Клиент родного API Gemini (google-genai)."""
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+        from google.genai import types
+        # Библиотека Google пишет предупреждение про автовызов функций на каждый запрос — в логе оно не нужно
+        logging.getLogger("google_genai.models").setLevel(logging.ERROR)
+        client_args = {"proxy": GEMINI_PROXY} if GEMINI_PROXY else {}
+        http_options = (
+            types.HttpOptions(base_url=GEMINI_BASE_URL or None, client_args=client_args or None)
+            if client_args or GEMINI_BASE_URL else None
+        )
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_options)
+    return _gemini_client
+
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+def _ask_gemini(model_name: str, system_prompt: str, user_prompt: str, response_model: Type[ModelT]) -> ModelT:
+    """Запрос к Gemini: ответ приходит строго по схеме pydantic-модели."""
+    from google.genai import types
+    response = get_gemini_client().models.generate_content(
+        model=model_name,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=response_model,
+            temperature=0.3,
+        )
+    )
+    content = (response.text or "").strip()
+    if not content:
+        raise ValueError("пустой ответ модели")
+    return response_model(**json.loads(content))
+
+def _ask_openai_compatible(model_name: str, system_prompt: str, user_prompt: str, response_model: Type[ModelT]) -> ModelT:
+    """Запрос к OpenAI-совместимому API (DeepSeek и т.п.) в режиме JSON."""
+    response = get_llm_client().chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.3,
+        max_tokens=16000
+    )
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if not content:
+        raise ValueError(f"пустой ответ модели (finish_reason={choice.finish_reason})")
+    return response_model(**json.loads(content))
+
+def _error_code(error: Exception) -> Optional[int]:
+    """Код ответа нейросети: у OpenAI-клиента это status_code, у Gemini — code."""
+    for attribute in ("status_code", "code"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+def _plan(screening: bool) -> List[Tuple[str, List[str]]]:
+    """Нейросети и их модели по порядку: сначала все модели Gemini, затем запасная. Недоступные сейчас пропускаются."""
+    plan: List[Tuple[str, List[str]]] = []
+    if GEMINI_API_KEY:
+        plan.append((GEMINI, [GEMINI_SCREEN_MODEL] if screening else [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]))
+    if LLM_API_KEY:
+        plan.append((FALLBACK_API, [LLM_SCREEN_MODEL] if screening else [LLM_MODEL, *LLM_FALLBACK_MODELS]))
+
+    now = time.monotonic()
+    return [
+        (provider, list(dict.fromkeys(m for m in models if m)))
+        for provider, models in plan
+        if _blocked_until.get(provider, 0) <= now
+    ]
+
+def take_fallback_note() -> Optional[str]:
+    """Забирает сообщение о переходе на запасную нейросеть (для уведомления в Telegram); повторно не возвращает."""
+    global _fallback_note
+    note, _fallback_note = _fallback_note, None
+    return note
+
+def describe_models() -> str:
+    """Какие нейросети и модели будут работать — для лога запуска."""
+    parts = []
+    if GEMINI_API_KEY:
+        parts.append(f"Gemini: {', '.join([GEMINI_MODEL, *GEMINI_FALLBACK_MODELS])}")
+    if LLM_API_KEY:
+        parts.append(f"{'запасная — ' if GEMINI_API_KEY else ''}{LLM_BASE_URL}: {', '.join([LLM_MODEL, *LLM_FALLBACK_MODELS])}")
+    return " | ".join(parts) or "не заданы ключи нейросетей"
+
+def describe_screen_models() -> str:
+    """Какие модели отбирают заказы — для лога запуска."""
+    models = [GEMINI_SCREEN_MODEL if GEMINI_API_KEY else "", LLM_SCREEN_MODEL if LLM_API_KEY else ""]
+    return ", ".join(m for m in models if m) or "отключён"
 
 def request_json_from_llm(
     system_prompt: str,
     user_prompt: str,
     response_model: Type[ModelT],
-    models: Optional[Sequence[str]] = None
+    screening: bool = False
 ) -> Tuple[ModelT, str]:
     """
-    Запрос к нейросети в режиме JSON с проверкой ответа по pydantic-модели.
-    Перебирает модели (по умолчанию основную и запасные). Возвращает (ответ, имя модели).
+    Запрос к нейросети с проверкой ответа по pydantic-модели: сначала Gemini, при ошибке — запасная нейросеть.
+    Возвращает (ответ, имя модели).
     """
-    client = get_llm_client()
+    global _fallback_note
     last_error = None
-    for model_name in dict.fromkeys(models or [LLM_MODEL, *LLM_FALLBACK_MODELS]):
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Запрос к нейросети (модель: {model_name}, попытка {attempt + 1})...")
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.3,
-                    max_tokens=16000
-                )
-                choice = response.choices[0]
-                content = (choice.message.content or "").strip()
-                if not content:
-                    raise ValueError(f"пустой ответ модели (finish_reason={choice.finish_reason})")
-                return response_model(**json.loads(content)), model_name
+    plan = _plan(screening)
+    if not plan:
+        raise RuntimeError(
+            "нет доступных нейросетей: ключи не заданы или все нейросети временно отключены "
+            "после отказа (ключ, баланс или лимит запросов)"
+        )
+    for provider, models in plan:
+        codes: List[Optional[int]] = []
+        for model_name in models:
+            key_refused = False
+            for attempt in range(2):
+                try:
+                    logger.info(f"Запрос к нейросети (модель: {model_name}, попытка {attempt + 1})...")
+                    result = (_ask_gemini if provider == GEMINI else _ask_openai_compatible)(
+                        model_name, system_prompt, user_prompt, response_model
+                    )
+                    if provider != GEMINI and GEMINI_API_KEY:
+                        reason = f"Причина: {str(last_error)[:300]}" if last_error else "Gemini временно отключён после отказа."
+                        _fallback_note = (
+                            f"Gemini ({GEMINI_MODEL}) не отвечает — заказы анализирует запасная нейросеть ({model_name}). {reason}"
+                        )
+                    return result, model_name
 
-            except APIStatusError as e:
-                last_error = e
-                if e.status_code in (401, 402, 403):
-                    # Неверный ключ, закончился баланс или нет доступа — другие модели этого API не помогут
-                    logger.error(f"Нейросеть отклонила запрос ({e.status_code}): {e}")
-                    raise
-                logger.warning(f"Модель {model_name} вернула ошибку: {e}.")
-                break  # Временные ошибки (429/5xx) SDK уже повторил сам — переходим к следующей модели
-            except ValueError as e:
-                # Пустой ответ, битый JSON или ответ не по схеме — повторяем запрос
-                last_error = e
-                logger.warning(f"Модель {model_name} вернула некорректный ответ: {e}")
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Модель {model_name} недоступна: {e}.")
-                break  # Сеть или таймаут — переходим к следующей модели
+                except ValueError as e:
+                    # Пустой ответ, битый JSON или ответ не по схеме — повторяем запрос
+                    last_error = e
+                    logger.warning(f"Модель {model_name} вернула некорректный ответ: {e}")
+                except Exception as e:
+                    last_error = e
+                    code = _error_code(e)
+                    codes.append(code)
+                    if code in AUTH_CODES:
+                        # Неверный ключ, нет доступа или закончился баланс — остальные модели этой нейросети не помогут
+                        _blocked_until[provider] = time.monotonic() + AUTH_COOLDOWN
+                        logger.error(f"{provider} отклонила запрос ({code}): {e}. Не обращаемся {AUTH_COOLDOWN // 60} мин.")
+                        key_refused = True
+                    else:
+                        logger.warning(f"Модель {model_name} недоступна: {e}.")
+                    break  # Сеть, таймаут или ошибка модели — переходим к следующей модели
+            if key_refused:
+                break
+        if codes and all(code == 429 for code in codes):
+            # Лимит запросов исчерпан у всех моделей этой нейросети
+            _blocked_until[provider] = time.monotonic() + QUOTA_COOLDOWN
+            logger.warning(f"{provider}: превышен лимит запросов у всех моделей. Не обращаемся {QUOTA_COOLDOWN // 60} мин.")
 
     logger.error(f"Все модели нейросети вернули ошибку. Последняя: {last_error}")
     raise last_error
@@ -461,7 +583,7 @@ def screen_kwork_order(title: str, description: str, budget_info: str = "", rubr
     )
     rubric_line = f"Рубрика: {rubric}\n" if rubric else ""
     user_prompt = f"{rubric_line}Заголовок: {title}\nБюджет: {budget_info}\n\nТекст задания:\n{description}"
-    result, model_name = request_json_from_llm(system_prompt, user_prompt, OrderScreening, models=[LLM_SCREEN_MODEL])
+    result, model_name = request_json_from_llm(system_prompt, user_prompt, OrderScreening, screening=True)
     logger.info(f"Предварительный отбор ({model_name}): {'подходит' if result.is_feasible else 'не подходит'} — {result.reasoning}")
     return result
 

@@ -6,7 +6,18 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-# Нейросеть для анализа заказов: любой OpenAI-совместимый API (по умолчанию DeepSeek)
+# Основная нейросеть для анализа заказов — Gemini (родной API Google).
+# Если ключа нет или Gemini не отвечает, работает запасная нейросеть (LLM_* ниже)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
+# Запасные модели Gemini через запятую — используются, если основная вернула ошибку
+GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.7-flash").split(",") if m.strip()]
+# Дешёвая модель Gemini для предварительного отбора заказов
+GEMINI_SCREEN_MODEL = os.getenv("GEMINI_SCREEN_MODEL", "gemini-3.5-flash-lite").strip()
+# Адрес API Gemini (пусто — стандартный адрес Google)
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip()
+
+# Запасная нейросеть: любой OpenAI-совместимый API (по умолчанию DeepSeek)
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-pro").strip()
@@ -89,6 +100,9 @@ def normalize_proxy(raw: str) -> str:
 # Прокси для запросов к нейросети (необязательно)
 # Поддерживает любые форматы: http://user:pass@ip:port или ip:port:user:pass
 LLM_PROXY = normalize_proxy(os.getenv("LLM_PROXY", "").strip())
+
+# Прокси для запросов к Gemini (необязательно) — на случай блокировки Google по стране
+GEMINI_PROXY = normalize_proxy(os.getenv("GEMINI_PROXY", "").strip())
 
 
 

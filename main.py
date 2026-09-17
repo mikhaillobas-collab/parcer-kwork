@@ -14,7 +14,14 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import config
 from database import init_db, is_order_processed, save_order, get_stats, get_order_by_id, describe_database
-from gemini_analyzer import analyze_kwork_order, parse_budget_details, screen_kwork_order
+from gemini_analyzer import (
+    analyze_kwork_order,
+    describe_models,
+    describe_screen_models,
+    parse_budget_details,
+    screen_kwork_order,
+    take_fallback_note
+)
 from kwork_parser import KworkBot, FavouriteRubricsNotFound
 from tg_bot import (
     start_telegram_polling,
@@ -51,12 +58,19 @@ async def send_alert(kind: str, text: str) -> None:
         logger.warning(f"Не удалось отправить предупреждение в Telegram: {e}")
 
 async def notify_model_error(error: Exception) -> None:
-    """Сообщает в Telegram, что нейросеть не отвечает (закончился баланс, отключён ключ и т.п.)."""
+    """Сообщает в Telegram, что ни одна нейросеть не отвечает (закончился баланс, отключён ключ и т.п.)."""
     await send_alert(
         "model",
-        f"⚠️ <b>Нейросеть ({html.escape(config.LLM_MODEL)}) не отвечает — заказы не анализируются.</b>\n"
+        "⚠️ <b>Нейросети не отвечают — заказы не анализируются.</b>\n"
         f"<code>{html.escape(str(error)[:500])}</code>"
     )
+
+async def notify_fallback_if_any() -> None:
+    """Сообщает в Telegram, что основная нейросеть (Gemini) недоступна и работает запасная."""
+    note = take_fallback_note()
+    if note:
+        logger.warning(note)
+        await send_alert("fallback", f"⚠️ <b>{html.escape(note)}</b>")
 
 async def notify_favourites_missing() -> None:
     """Сообщает в Telegram, что на бирже не видно любимых рубрик (слетел вход в Kwork или список пуст)."""
@@ -150,6 +164,7 @@ async def run_parser_loop(bot: KworkBot):
                     except Exception as e:
                         logger.warning(f"Предварительный отбор #{order_id} не удался ({e}) — заказ уйдёт на полный анализ")
                         screening = None
+                    await notify_fallback_if_any()
                     if screening and not screening.is_feasible:
                         logger.info(f"❌ Заказ #{order_id} отсеян на предварительном отборе: {screening.reasoning}")
                         save_order(
@@ -172,6 +187,7 @@ async def run_parser_loop(bot: KworkBot):
                     logger.error(f"Не удалось проанализировать заказ #{order_id} через нейросеть: {e}")
                     await notify_model_error(e)
                     continue
+                await notify_fallback_if_any()
 
                 if not analysis.is_feasible:
                     logger.info(f"❌ Заказ #{order_id} признан нецелесообразным: {analysis.reasoning}")
@@ -238,12 +254,12 @@ async def main():
     print("🤖 KWORK AUTOMATION BOT (HUMAN-IN-THE-LOOP + AIOGRAM 3)")
     print("=" * 65)
 
-    if not config.LLM_API_KEY:
-        print("\n❌ ОШИБКА: Не задан LLM_API_KEY (ключ API нейросети) в переменных окружения!")
+    if not config.GEMINI_API_KEY and not config.LLM_API_KEY:
+        print("\n❌ ОШИБКА: не задан ни GEMINI_API_KEY, ни LLM_API_KEY (ключи нейросетей) в переменных окружения!")
         sys.exit(1)
 
-    print(f"🔹 Нейросеть: {config.LLM_MODEL} (запасные: {', '.join(config.LLM_FALLBACK_MODELS) or 'нет'}) — {config.LLM_BASE_URL}")
-    print(f"🔹 Предварительный отбор заказов: {config.LLM_SCREEN_MODEL or 'отключён'}")
+    print(f"🔹 Нейросеть: {describe_models()}")
+    print(f"🔹 Предварительный отбор заказов: {describe_screen_models()}")
     print(f"🔹 Биржа: любимые рубрики — {config.KWORK_FAVOURITES_URL}")
     print(f"🔹 Режим DRY_RUN: {'ВКЛЮЧЕН (тест)' if config.DRY_RUN else 'ВЫКЛЮЧЕН (боевой)'}")
     print(f"🔹 Браузер: {'Скрытый (headless)' if config.HEADLESS else 'Видимый (экран)'}")
